@@ -1,0 +1,32 @@
+.{
+    .name = .dvui_vk,
+    .version = "0.0.0",
+    .fingerprint = 0x8c17814f9967671d,
+    .dependencies = .{
+        .dvui = .{
+            // .path = "dvui",
+            .url = "git+https://github.com/david-vanderson/dvui/?ref=HEAD#ad283f848537fdb496b2beaae9a79a0b8c88e82b",
+            .hash = "dvui-0.2.0-AQFJmV4x0gCBR0RJXHjnjb2DzRKT9ZXCSKgZ7zk8MQ7g",
+        },
+        .vulkan_zig = .{
+            //.path = "deps/vulkan-zig",
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#2846d415d8c9f96c1675944d0762745422fe7aa0",
+            .hash = "vulkan-0.0.0-r7Ytx25WAwBqA-Qx5n7Hj1yZFEo_IwctejwitvrfL1k5",
+        },
+        .vk_kickstart = .{
+            // .path = "vk-kickstart",
+            // .url = "git+https://github.com/mikastiv/vk-kickstart.git#e1eeab13be11ff5d1623ecf138917460380af5b8",
+            // .hash = "vk_kickstart-0.1.0-AAAAACkjJwCEX2VtlZXSVJaS-HzD2SPxLmKavvXwrM9S",
+            // fork
+            .url = "git+https://github.com/Deins/vk-kickstart.git#3c6a0c0aac4af68a11df6b7013454db699a3d774",
+            .hash = "vk_kickstart-0.1.0-YDdE9LgiJwDZLSg86m8AajnDIBk4Ga2LtgbFjOakXCNX",
+        },
+        // required for windows
+        .win32 = .{
+            .url = "git+https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c",
+            .hash = "zigwin32-25.0.28-preview-AAAAAHsJ-wPA4nREAzT_OOkF6gLrornNuHqREfHDADoS",
+            .lazy = true,
+        },
+    },
+    .paths = .{""},
+}
