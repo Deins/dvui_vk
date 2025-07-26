@@ -189,26 +189,8 @@ pub const VkBackend = struct {
     contexts_pool: std.heap.MemoryPool(Context),
 
     vkc: VkContext,
-    renderer: ?VkRenderer = null,
+    renderer: ?VkRenderer = null, // dvui renderer
     prev_frame_stats: VkRenderer.Stats = .{},
-
-    pub const VkContext = struct {
-        alloc: ?*vk.AllocationCallbacks = null,
-        instance: vk.InstanceProxy,
-        physical_device: vkk.PhysicalDevice,
-        device: vk.DeviceProxy,
-        graphics_queue: vk.QueueProxy,
-        present_queue: vk.QueueProxy,
-        cmd_pool: vk.CommandPool,
-        // heap allocated vtables, all proxies take pointer to this
-        instance_wrapper: *vk.InstanceWrapper,
-        device_wrapper: *vk.DeviceWrapper,
-
-        pub fn deinit(self: VkContext, alloc: std.mem.Allocator) void {
-            alloc.destroy(self.device_wrapper);
-            alloc.destroy(self.instance_wrapper);
-        }
-    };
 
     pub fn init(gpa: std.mem.Allocator, vkc: VkContext) VkBackend {
         return .{
@@ -244,6 +226,102 @@ pub const VkBackend = struct {
         self.contexts_pool.destroy(c);
     }
 };
+
+pub const VkContext = struct {
+    alloc: ?*vk.AllocationCallbacks = null,
+    instance: vk.InstanceProxy,
+    physical_device: vkk.PhysicalDevice,
+    device: vk.DeviceProxy,
+    graphics_queue: vk.QueueProxy,
+    present_queue: vk.QueueProxy,
+    cmd_pool: vk.CommandPool,
+    // heap allocated vtables, all proxies take pointer to this
+    instance_wrapper: *vk.InstanceWrapper,
+    device_wrapper: *vk.DeviceWrapper,
+
+    pub fn deinit(self: VkContext, alloc: std.mem.Allocator) void {
+        alloc.destroy(self.device_wrapper);
+        alloc.destroy(self.instance_wrapper);
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        loader: anytype,
+        window_context: *Context,
+    ) !VkContext {
+        const instance_wrapper = try allocator.create(vk.InstanceWrapper);
+        errdefer allocator.destroy(instance_wrapper);
+        const device_wrapper = try allocator.create(vk.DeviceWrapper);
+        errdefer allocator.destroy(device_wrapper);
+
+        const instance_handle = try vkk.instance.create(
+            loader,
+            .{ .required_api_version = @bitCast(vk.API_VERSION_1_3) },
+            null,
+        );
+        instance_wrapper.* = vk.InstanceWrapper.load(instance_handle, loader);
+        const instance = vk.InstanceProxy.init(instance_handle, instance_wrapper);
+        errdefer instance.destroyInstance(null);
+
+        // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
+        // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
+
+        try window_context.createVkSurface(instance);
+
+        const physical_device = try vkk.PhysicalDevice.select(instance.handle, .{
+            .surface = window_context.surface,
+            .transfer_queue = .dedicated,
+            .required_api_version = @bitCast(vk.API_VERSION_1_2),
+            .required_extensions = &.{
+                // vk.extensions.khr_ray_tracing_pipeline.name,
+                // vk.extensions.khr_acceleration_structure.name,
+                // vk.extensions.khr_deferred_host_operations.name,
+                // vk.extensions.khr_buffer_device_address.name,
+                // vk.extensions.ext_descriptor_indexing.name,
+            },
+            .required_features = .{
+                .sampler_anisotropy = vk.TRUE,
+            },
+            .required_features_12 = .{
+                .descriptor_indexing = vk.TRUE,
+            },
+        });
+
+        std.log.info("selected {s}", .{physical_device.name()});
+
+        var features = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{};
+
+        const device_handle = try vkk.device.create(&physical_device, @ptrCast(&features), null);
+        device_wrapper.* = vk.DeviceWrapper.load(device_handle, instance_wrapper.dispatch.vkGetDeviceProcAddr.?);
+        const device = vk.DeviceProxy.init(device_handle, device_wrapper);
+        errdefer device.destroyDevice(null);
+
+        const graphics_queue_index = physical_device.graphics_queue_index;
+        const present_queue_index = physical_device.present_queue_index;
+        const graphics_queue_handle = device.getDeviceQueue(graphics_queue_index, 0);
+        const present_queue_handle = device.getDeviceQueue(present_queue_index, 0);
+        const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device_wrapper);
+        const present_queue = vk.QueueProxy.init(present_queue_handle, device_wrapper);
+
+        const cmd_pool = try device.createCommandPool(&.{
+            .queue_family_index = graphics_queue_index,
+        }, null);
+        errdefer device.destroyCommandPool(cmd_pool, null);
+
+        return .{
+            .instance_wrapper = instance_wrapper,
+            .device_wrapper = device_wrapper,
+            .instance = instance,
+            // .debug_messenger = debug_messenger,
+            .device = device,
+            .physical_device = physical_device,
+            .graphics_queue = graphics_queue,
+            .present_queue = present_queue,
+            .cmd_pool = cmd_pool,
+        };
+    }
+};
+
 pub const vk = @import("vk");
 
 pub const GenericError = dvui.Backend.GenericError;
@@ -472,89 +550,16 @@ pub fn main() !void {
         .icon = init_opts.icon,
     });
 
-    { // todo: clean up once everything is decoupled from surface
-        const allocator = gpa;
-        const instance_wrapper = try allocator.create(vk.InstanceWrapper);
-        errdefer allocator.destroy(instance_wrapper);
-        const device_wrapper = try allocator.create(vk.DeviceWrapper);
-        errdefer allocator.destroy(device_wrapper);
-
-        const instance_handle = try vkk.instance.create(
-            loader,
-            .{ .required_api_version = @bitCast(vk.API_VERSION_1_3) },
-            null,
-        );
-        instance_wrapper.* = vk.InstanceWrapper.load(instance_handle, loader);
-        const instance = vk.InstanceProxy.init(instance_handle, instance_wrapper);
-        errdefer instance.destroyInstance(null);
-
-        // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
-        // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
-
-        try window_context.createVkSurface(instance);
-
-        const physical_device = try vkk.PhysicalDevice.select(instance.handle, .{
-            .surface = window_context.surface,
-            .transfer_queue = .dedicated,
-            .required_api_version = @bitCast(vk.API_VERSION_1_2),
-            .required_extensions = &.{
-                // vk.extensions.khr_ray_tracing_pipeline.name,
-                // vk.extensions.khr_acceleration_structure.name,
-                // vk.extensions.khr_deferred_host_operations.name,
-                // vk.extensions.khr_buffer_device_address.name,
-                // vk.extensions.ext_descriptor_indexing.name,
-            },
-            .required_features = .{
-                .sampler_anisotropy = vk.TRUE,
-            },
-            .required_features_12 = .{
-                .descriptor_indexing = vk.TRUE,
-            },
-        });
-
-        std.log.info("selected {s}", .{physical_device.name()});
-
-        var features = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{};
-
-        const device_handle = try vkk.device.create(&physical_device, @ptrCast(&features), null);
-        device_wrapper.* = vk.DeviceWrapper.load(device_handle, instance_wrapper.dispatch.vkGetDeviceProcAddr.?);
-        const device = vk.DeviceProxy.init(device_handle, device_wrapper);
-        errdefer device.destroyDevice(null);
-
-        const graphics_queue_index = physical_device.graphics_queue_index;
-        const present_queue_index = physical_device.present_queue_index;
-        const graphics_queue_handle = device.getDeviceQueue(graphics_queue_index, 0);
-        const present_queue_handle = device.getDeviceQueue(present_queue_index, 0);
-        const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device_wrapper);
-        const present_queue = vk.QueueProxy.init(present_queue_handle, device_wrapper);
-
-        const cmd_pool = try device.createCommandPool(&.{
-            .queue_family_index = graphics_queue_index,
-        }, null);
-        errdefer device.destroyCommandPool(cmd_pool, null);
-
-        b.vkc = .{
-            .instance_wrapper = instance_wrapper,
-            .device_wrapper = device_wrapper,
-            .instance = instance,
-            // .debug_messenger = debug_messenger,
-            .device = device,
-            .physical_device = physical_device,
-            .graphics_queue = graphics_queue,
-            .present_queue = present_queue,
-            .cmd_pool = cmd_pool,
-        };
-    }
+    b.vkc = try VkContext.init(gpa, loader, window_context);
 
     window_context.swapchain_state = try Context.SwapchainState.init(window_context, .{
         .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
         .present_queue_index = b.vkc.physical_device.present_queue_index,
         .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
         .desired_formats = &.{
-            // TODO: i am still not sure how to go about it, ideally:
-            // texture format srgb -> sampled with shader converts it to linear -> shader math linear -> swapchain (if format srgb) converts back to srgb -> then colorspace interprets it as srgb
-            // .{ .format = .b8g8r8a8_srgb, .color_space = .srgb_nonlinear_khr },
-
+            // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
+            // TODO: add support for both linear and srgb render targets
+            // similar issue: https://github.com/ocornut/imgui/issues/578
             .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
             .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
         },
@@ -889,13 +894,13 @@ pub fn createCommandBuffers(
     return command_buffers;
 }
 
-const FrameSyncObjects = struct {
+pub const FrameSyncObjects = struct {
     image_available_semaphore: vk.Semaphore,
     render_finished_semaphore: vk.Semaphore,
     in_flight_fence: vk.Fence,
 };
 
-fn present(
+pub fn present(
     ctx: *const Context,
     command_buffer: vk.CommandBuffer,
     sync: FrameSyncObjects,
@@ -947,7 +952,7 @@ fn present(
     return true;
 }
 
-const win = if (is_windows) struct {
+pub const win = if (is_windows) struct {
     const log = std.log.scoped(.winapi);
     // most stuff here borrowed from dvui/src/backend/dx11
     fn resToErr(res: win32.HRESULT, what: []const u8) !void {
@@ -1200,11 +1205,12 @@ const win = if (is_windows) struct {
                     ctx.last_pixel_size = .{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
                     ctx.last_window_size = win.windowSize(hwnd, psize);
                     if (ctx.swapchain_state != null) {
-                        const app = dvui.App.get() orelse unreachable;
-                        paint(app, g_app_state, ctx, 0) catch |err| {
-                            ctx.received_close = true;
-                            slog.warn("paint error during resize: {}", .{err});
-                        };
+                        if (dvui.App.get()) |app| {
+                            paint(app, g_app_state, ctx, 0) catch |err| {
+                                ctx.received_close = true;
+                                slog.warn("paint error during resize: {}", .{err});
+                            };
+                        }
                     }
                 }
                 // if (contextFromHwnd(hwnd)) |ctx| {

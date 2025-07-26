@@ -52,9 +52,10 @@ pub fn build(b: *Build) !void {
         // dvui_vk_backend.addImport("dvui_win", dvui_win);
     } else @panic("TODO");
 
+    //
+    //   Examples
     const exe = b.addExecutable(.{
         .name = "dvui_vk_demo",
-        // .root_source_file = b.path("examples/app.zig"),
         .root_source_file = b.path("examples/app.zig"),
         .target = target,
         .optimize = optimize,
@@ -67,6 +68,21 @@ pub fn build(b: *Build) !void {
     }
     b.installArtifact(exe);
     b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe).step);
+
+    const exe_standalone = b.addExecutable(.{
+        .name = "dvui_vk_demo",
+        .root_source_file = b.path("examples/standalone.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_standalone.root_module.addImport("dvui", dvui_module);
+    exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
+    if (target.result.os.tag == .windows) {
+        exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
+        exe_standalone.subsystem = .Windows;
+    }
+    b.installArtifact(exe_standalone);
+    b.step("run-standalone", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
 
     { // Shaders
         const Shader = struct {
@@ -166,6 +182,9 @@ pub fn build(b: *Build) !void {
         // add shader modules
         for (shaders.items) |shader| {
             exe.root_module.addAnonymousImport(shader.name, .{
+                .root_source_file = shader.path,
+            });
+            exe_standalone.root_module.addAnonymousImport(shader.name, .{
                 .root_source_file = shader.path,
             });
             // exe_unit_tests.root_module.addAnonymousImport(shader.name, .{
