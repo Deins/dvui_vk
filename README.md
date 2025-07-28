@@ -1,4 +1,4 @@
-# Sokol Backend for dvui
+# Vulkan Backend for dvui
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui). 
 
@@ -10,8 +10,7 @@ This project provides a vulkan backend for [dvui](https://github.com/david-vande
 ### 🚧 Not yet implemented / TODO 🚧
 * Render textures
 * Touch events
-* On top example
-* variable frame rate (sleeping when inactive)
+* Variable frame rate (sleeping when inactive)
 
 ## Build & Run
 ### With vulkan sdk (recommended)
@@ -27,3 +26,6 @@ Get vk.xml form somewhere such as [vulkan-headers](https://github.com/KhronosGro
 ```sh
 zig build run -Dvk_registry=/path/to/vk.xml -Doptimize=ReleaseFast
 ```
+
+### Standalone example
+Similar as rest only `zig build run-standalone`
