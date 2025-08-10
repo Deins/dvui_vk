@@ -65,7 +65,9 @@ pub const Context = struct {
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
             var swapchain = try vkk.Swapchain.create(
-                vkc.device.handle,
+                gpa,
+                vkc.instance,
+                vkc.device,
                 vkc.physical_device.handle,
                 ctx.surface,
                 options,
@@ -74,7 +76,8 @@ pub const Context = struct {
             errdefer vkc.device.destroySwapchainKHR(swapchain.handle, null);
             slog.debug("created swapchain: {}X {}x{} {}", .{ swapchain.image_count, swapchain.extent.width, swapchain.extent.height, swapchain.image_format });
 
-            const images = try swapchain.getImagesAlloc(gpa);
+            const images: []vk.Image = try gpa.alloc(vk.Image, swapchain.image_count);
+            try swapchain.getImages(images);
             const image_views = try swapchain.getImageViewsAlloc(gpa, images, vkc.alloc);
             return .{
                 .swapchain = swapchain,
@@ -83,14 +86,17 @@ pub const Context = struct {
             };
         }
 
-        pub fn deinit(self: @This(), ctx: *Context) void {
+        pub fn deinit(self: *@This(), ctx: *Context) void {
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
             for (self.framebuffers) |fb| vkc.device.destroyFramebuffer(fb, vkc.alloc);
             gpa.free(self.framebuffers);
+            self.framebuffers = &.{};
             for (self.image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
             gpa.free(self.image_views);
+            self.image_views = &.{};
             gpa.free(self.images);
+            self.images = &.{};
         }
 
         pub fn recreate(self: *@This(), ctx: *Context) !void {
@@ -103,7 +109,9 @@ pub const Context = struct {
             };
             const old_swapchain = self.swapchain;
             const new_swapchain = try vkk.Swapchain.create(
-                vkc.device.handle,
+                gpa,
+                vkc.instance,
+                vkc.device,
                 vkc.physical_device.handle,
                 ctx.surface,
                 .{
@@ -122,8 +130,9 @@ pub const Context = struct {
             vkc.device.destroySwapchainKHR(old_swapchain.handle, vkc.alloc);
 
             self.deinit(ctx);
+            self.images = try gpa.alloc(vk.Image, self.swapchain.image_count);
             self.swapchain = new_swapchain;
-            self.images = try self.swapchain.getImagesAlloc(gpa);
+            try self.swapchain.getImages(self.images);
             self.image_views = try self.swapchain.getImageViewsAlloc(gpa, self.images, vkc.alloc);
             self.framebuffers = &.{};
         }
@@ -140,7 +149,7 @@ pub const Context = struct {
     pub fn deinit(self: *@This()) void {
         self.dvui_window.deinit();
         self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
-        if (self.swapchain_state) |s| s.deinit(self);
+        if (self.swapchain_state) |*s| s.deinit(self);
         self.* = undefined;
     }
 
@@ -235,13 +244,11 @@ pub const VkContext = struct {
     graphics_queue: vk.QueueProxy,
     present_queue: vk.QueueProxy,
     cmd_pool: vk.CommandPool,
-    // heap allocated vtables, all proxies take pointer to this
-    instance_wrapper: *vk.InstanceWrapper,
-    device_wrapper: *vk.DeviceWrapper,
 
     pub fn deinit(self: VkContext, alloc: std.mem.Allocator) void {
-        alloc.destroy(self.device_wrapper);
-        alloc.destroy(self.instance_wrapper);
+        self.physical_device.deinit();
+        alloc.destroy(self.instance.wrapper);
+        alloc.destroy(self.device.wrapper);
     }
 
     pub fn init(
@@ -249,18 +256,12 @@ pub const VkContext = struct {
         loader: anytype,
         window_context: *Context,
     ) !VkContext {
-        const instance_wrapper = try allocator.create(vk.InstanceWrapper);
-        errdefer allocator.destroy(instance_wrapper);
-        const device_wrapper = try allocator.create(vk.DeviceWrapper);
-        errdefer allocator.destroy(device_wrapper);
-
-        const instance_handle = try vkk.instance.create(
+        const instance = try vkk.instance.create(
+            allocator,
             loader,
             .{ .required_api_version = @bitCast(vk.API_VERSION_1_3) },
             null,
         );
-        instance_wrapper.* = vk.InstanceWrapper.load(instance_handle, loader);
-        const instance = vk.InstanceProxy.init(instance_handle, instance_wrapper);
         errdefer instance.destroyInstance(null);
 
         // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
@@ -268,7 +269,7 @@ pub const VkContext = struct {
 
         try window_context.createVkSurface(instance);
 
-        const physical_device = try vkk.PhysicalDevice.select(instance.handle, .{
+        const physical_device = try vkk.PhysicalDevice.select(allocator, instance, .{
             .surface = window_context.surface,
             .transfer_queue = .dedicated,
             .required_api_version = @bitCast(vk.API_VERSION_1_2),
@@ -291,17 +292,15 @@ pub const VkContext = struct {
 
         var features = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{};
 
-        const device_handle = try vkk.device.create(&physical_device, @ptrCast(&features), null);
-        device_wrapper.* = vk.DeviceWrapper.load(device_handle, instance_wrapper.dispatch.vkGetDeviceProcAddr.?);
-        const device = vk.DeviceProxy.init(device_handle, device_wrapper);
+        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(&features), null);
         errdefer device.destroyDevice(null);
 
         const graphics_queue_index = physical_device.graphics_queue_index;
         const present_queue_index = physical_device.present_queue_index;
         const graphics_queue_handle = device.getDeviceQueue(graphics_queue_index, 0);
         const present_queue_handle = device.getDeviceQueue(present_queue_index, 0);
-        const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device_wrapper);
-        const present_queue = vk.QueueProxy.init(present_queue_handle, device_wrapper);
+        const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device.wrapper);
+        const present_queue = vk.QueueProxy.init(present_queue_handle, device.wrapper);
 
         const cmd_pool = try device.createCommandPool(&.{
             .queue_family_index = graphics_queue_index,
@@ -309,8 +308,6 @@ pub const VkContext = struct {
         errdefer device.destroyCommandPool(cmd_pool, null);
 
         return .{
-            .instance_wrapper = instance_wrapper,
-            .device_wrapper = device_wrapper,
             .instance = instance,
             // .debug_messenger = debug_messenger,
             .device = device,
@@ -672,7 +669,7 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
     const command_buffer = app_state.command_buffers[current_frame_in_flight];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
     try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
-    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device_wrapper);
+    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
 
     const clear_values = [_]vk.ClearValue{
         .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },

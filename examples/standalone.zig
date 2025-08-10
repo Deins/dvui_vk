@@ -184,7 +184,7 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.Context, current_frame_in_
     const command_buffer = app_state.command_buffers[current_frame_in_flight];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
     try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
-    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device_wrapper);
+    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
 
     const clear_values = [_]vk.ClearValue{
         .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
