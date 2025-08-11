@@ -52,7 +52,7 @@ pub fn frame() !dvui.App.Result {
     var scaler = dvui.scale(@src(), .{ .scale = &dvui.currentWindow().content_scale, .pinch_zoom = .global }, .{ .rect = .cast(dvui.windowRect()) });
     scaler.deinit();
 
-    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .color_fill = .fill_window });
+    var scroll = dvui.scrollArea(@src(), .{}, .{ .expand = .both, .color_fill = dvui.themeGet().window.fill });
     defer scroll.deinit();
 
     var tl = dvui.textLayout(@src(), .{}, .{ .expand = .horizontal, .font_style = .title_4 });
@@ -92,7 +92,7 @@ pub fn frame() !dvui.App.Result {
     }
 
     {
-        var hbox = dvui.box(@src(), .horizontal, .{});
+        var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{});
         defer hbox.deinit();
         dvui.label(@src(), "Pinch Zoom or Scale", .{}, .{});
         if (dvui.buttonIcon(@src(), "plus", dvui.entypo.plus, .{}, .{}, .{})) {

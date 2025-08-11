@@ -120,13 +120,13 @@ pub fn main() !void {
 pub fn drawFrame(ctx: *DvuiVkBackend.Context) void {
     {
         // _ = dvui.windowHeader("settings", "", null);
-        const m = dvui.box(@src(), .horizontal, .{ .expand = .horizontal, .background = true, .gravity_y = 0 });
+        const m = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .gravity_y = 0 });
         defer m.deinit();
         _ = dvui.checkbox(@src(), &dvui.Examples.show_demo_window, "Show dvui demo", .{});
     }
 
     {
-        const stats_box = dvui.box(@src(), .vertical, .{ .gravity_x = 1, .background = true });
+        const stats_box = dvui.box(@src(), .{ .dir = .vertical }, .{ .gravity_x = 1, .background = true });
         ctx.drawStats();
         stats_box.deinit();
     }

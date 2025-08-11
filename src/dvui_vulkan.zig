@@ -169,12 +169,12 @@ pub const Context = struct {
         const idx_max = self.backend.renderer.?.current_frame.idx_data.len / @sizeOf(VkRenderer.Indice);
         dvui.label(@src(), "indices: {} / {}", .{ stats.indices, idx_max }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(stats.indices)) / @as(f32, @floatFromInt(idx_max));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = .{ .color = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) } });
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
 
         const verts_max = self.backend.renderer.?.current_frame.vtx_data.len / @sizeOf(VkRenderer.Vertex);
         dvui.label(@src(), "vertices:  {} / {}", .{ stats.verts, verts_max }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(stats.verts)) / @as(f32, @floatFromInt(verts_max));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = .{ .color = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) } });
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
 
         dvui.label(@src(), "Textures:", .{}, .{ .expand = .horizontal, .font_style = .caption_heading });
         dvui.label(@src(), "count:  {}", .{stats.textures_alive}, .{ .expand = .horizontal });
@@ -187,7 +187,7 @@ pub const Context = struct {
         const prealloc_mem_frame_used = stats.indices * @sizeOf(VkRenderer.Indice) + stats.verts * @sizeOf(VkRenderer.Vertex);
         dvui.label(@src(), "current frame:  {:.1} / {:.1}", .{ std.fmt.fmtIntSizeBin(prealloc_mem_frame_used), std.fmt.fmtIntSizeBin(prealloc_mem_frame) }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(prealloc_mem_frame_used)) / @as(f32, @floatFromInt(prealloc_mem_frame));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = .{ .color = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) } });
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
     }
 };
 

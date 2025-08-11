@@ -5,8 +5,8 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui/?ref=HEAD#ad283f848537fdb496b2beaae9a79a0b8c88e82b",
-            .hash = "dvui-0.2.0-AQFJmV4x0gCBR0RJXHjnjb2DzRKT9ZXCSKgZ7zk8MQ7g",
+            .url = "git+https://github.com/david-vanderson/dvui/?ref=HEAD#6a0fe99034118cc1b4c6e76a56f45acd1125c8b7",
+            .hash = "dvui-0.2.0-AQFJmT-U0gA9Q1cIJJFCUGKjz3D7Up2xu4qGTL0rqMhV",
         },
         .vulkan_zig = .{
             //.path = "deps/vulkan-zig",
