@@ -5,7 +5,7 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui/?ref=HEAD#6a0fe99034118cc1b4c6e76a56f45acd1125c8b7",
+            .url = "git+https://github.com/david-vanderson/dvui.git#5503b3e8994ea4c4dd6a63a0cc86368b7f673b08",
             .hash = "dvui-0.2.0-AQFJmT-U0gA9Q1cIJJFCUGKjz3D7Up2xu4qGTL0rqMhV",
         },
         .vulkan_zig = .{

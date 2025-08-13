@@ -1173,10 +1173,8 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
     }, interpolation);
     errdefer tex.deinit(self);
     const dev = self.dev;
-    var cmdbuf = try self.beginSingleTimeCommands();
-    // TODO: review what error handling should be optimal - if anything fails we should discard cmdbuf not submit it
-    defer self.endSingleTimeCommands(cmdbuf) catch unreachable;
 
+    // prep host side staging buffer for transfer
     const mreq = dev.getImageMemoryRequirements(tex.img);
     const img_staging = try self.stageToBuffer(.{
         .flags = .{},
@@ -1187,6 +1185,10 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
     defer dev.destroyBuffer(img_staging.buf, self.vk_alloc);
     defer dev.freeMemory(img_staging.mem, self.vk_alloc);
 
+    const cmdbuf = try self.beginSingleTimeCommands();
+    // TODO: review what error handling should be optimal - if anything fails we should discard cmdbuf not submit it
+    defer self.endSingleTimeCommands(cmdbuf) catch unreachable;
+
     const srr = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
         .base_mip_level = 0,
@@ -1194,7 +1196,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         .base_array_layer = 0,
         .layer_count = 1,
     };
-    { // transition image to dst_optimal
+    { // prep image to receive
         const img_barrier = vk.ImageMemoryBarrier{
             .src_access_mask = .{},
             .dst_access_mask = .{ .transfer_write_bit = true },
@@ -1207,8 +1209,8 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         };
         dev.cmdPipelineBarrier(cmdbuf, .{ .host_bit = true, .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
 
-        try self.endSingleTimeCommands(cmdbuf);
-        cmdbuf = try self.beginSingleTimeCommands();
+        // try self.endSingleTimeCommands(cmdbuf);
+        // cmdbuf = try self.beginSingleTimeCommands();
     }
     { // copy staging -> img
         const buff_img_copy = vk.BufferImageCopy{
@@ -1226,8 +1228,8 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         };
         dev.cmdCopyBufferToImage(cmdbuf, img_staging.buf, tex.img, .transfer_dst_optimal, 1, @ptrCast(&buff_img_copy));
 
-        try self.endSingleTimeCommands(cmdbuf);
-        cmdbuf = try self.beginSingleTimeCommands();
+        // try self.endSingleTimeCommands(cmdbuf);
+        // cmdbuf = try self.beginSingleTimeCommands();
     }
     { // transition to read only optimal
         const img_barrier = vk.ImageMemoryBarrier{
@@ -1242,8 +1244,8 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         };
         dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
 
-        try self.endSingleTimeCommands(cmdbuf);
-        cmdbuf = try self.beginSingleTimeCommands();
+        // try self.endSingleTimeCommands(cmdbuf);
+        // cmdbuf = try self.beginSingleTimeCommands();
     }
 
     return tex;
