@@ -1,21 +1,14 @@
 //! Experimental Vulkan dvui renderer
-//! Its not a full backend, only implements rendering related backend functions.
-//! All non rendering related functions get forwarded to base_backend (whatever backend is selected through build zig).
-//! Should work with any base backend as long as it doesn't break from not receiving some of the overridden callbacks or its not rendering from non rendering related calls.
-//! Tested only with sdl3 base backend.
-//!
-//! Notes:
-//! * Currently app must provide vulkan setup, swapchain & present logic, etc.
-//! * Param `frames_in_flight`, very important:
-//!   Currently renderer itself performs almost no locking with gpu except when creating new textures. Synchronization  is archived by using frames in flight as sync:
-//!   It is assumed that swapchain has limited number of images (not too many) and at worst case CPU can issue only that many frames before it will have no new frames where render to. That is good blocking/sync point.
-//!   By using that knowledge we delay any host->gpu resource operations by max_frames_in_flight to be sure there won't be any data races. (for example textureDeletion is delayed to make sure gpu doesn't use it any more)
-//!   But as swapchain management is left for application to do, application must make sure this is enforced and pass in this information as `max_frames_in_flight` during int.
-//!   Otherwise gpu frame data can get overwritten while its still being used leading to undefined behavior.
-//! * Memory: all space for vertex & index buffers is preallocated at start requiring setting appropriate limits in options. Requests to render over limit is safe but will lead to draw commands being ignored.
-//!   Texture bookkeeping is also preallocated. But images themselves are allocated individually at runtime. Currently 1 image = 1 allocation which is ok for large or few images,
-//!   but not great for many smaller images that can eat in max gpu allocation limit. TODO: implement hooks for general purpose allocator
-//!
+//! * Follows `max_frames_in_flight` convention which needs to be specified during init:
+//!     For resource management/synchronization its expected that no more than fixed number of begin/end frames will be in flight (alive, submitted, not yet finished by gpu).
+//!     It is used to avoid any unnecessary host<->gpu synchronization when just delaying such operation is possible.
+//!     If `max_frames_in_flight` is misconfigured or not enforced by app or user of renderer then data races and undefined behavior will happen. (for example texture might get deleted while its still in use on gpu).
+//! * Memory: all space for vertex & index buffers is preallocated at start requiring setting appropriate limits in options.
+//!     Requests to render over limit is safe but will lead to draw commands being ignored. Note that these settings are per frame and total memory allocated will depend on max frames in flight.
+//!     Texture bookkeeping is similarly preallocated. But actual image data on gpu are allocated individually at runtime. Currently 1 image = 1 allocation which is ok for large or few images,
+//!     but not great for many smaller images that can eat in max gpu allocation limit. TODO: implement hooks for general purpose allocator
+//! * Queue submissions: renderer expects itself to be given vk.CommandBuffer where it will record all render commands between begin/end calls.
+//!     However to support runtime texture upload direct queue access is also required. Multi-threaded scenarios have not been tested but optional queue lock/release callbacks can be specified if needed.
 const std = @import("std");
 const builtin = @import("builtin");
 const slog = std.log.scoped(.dvui_vulkan);
@@ -42,27 +35,21 @@ const texture_tracing = false; // tace leaks and usage
 
 /// initialization options, caller still owns all passed in resources
 pub const InitOptions = struct {
-    /// vulkan loader entry point for getting Vulkan functions
-    vkGetDeviceProcAddr: vk.PfnGetDeviceProcAddr,
-
-    /// vulkan device
-    dev: vk.Device,
-    /// queue - used only for texture upload,
-    /// used here only once during initialization, afterwards texture upload queue must be provided with beginFrame()
-    queue: vk.Queue,
-    /// command pool - used only for texture upload
-    comamnd_pool: vk.CommandPool,
-    /// vulkan physical device
+    dev: vk.DeviceProxy,
     pdev: vk.PhysicalDevice,
-    /// physical device memory properties
     mem_props: vk.PhysicalDeviceMemoryProperties,
     /// render pass from which renderer will be used
     render_pass: vk.RenderPass,
     /// optional vulkan host side allocator
     vk_alloc: ?*vk.AllocationCallbacks = null,
 
-    /// How many frames can be in flight in worst case
-    /// In simple single window configuration where synchronization happens when presenting should be at least (swapchain image count - 1) or larger.
+    /// queue - used only for texture upload
+    /// used here only once during initialization, afterwards texture upload queue must be provided with beginFrame()
+    queue: vk.Queue,
+    /// command pool - used only for texture upload
+    comamnd_pool: vk.CommandPool,
+
+    /// How many frames can be in flight in worst case (usually equals swapchain image count)
     max_frames_in_flight: u32,
 
     /// Maximum number of indices that can be submitted in single frame
@@ -75,7 +62,6 @@ pub const InitOptions = struct {
     max_textures: TextureIdx = 256,
 
     /// Maximum number of render textures
-    /// This many render pass surpasses will be allocated for texture targets
     /// NOTE: render textures are also textures so consume max_textures budget as well when actually created
     max_texture_targets: TextureIdx = 64,
 
@@ -115,9 +101,6 @@ pub const Stats = struct {
     textures_alive: u16 = 0,
     textures_mem: usize = 0,
 };
-
-// we need stable pointer to this, but its not worth allocating it, so make it global
-var g_dev_wrapper: vk.DeviceWrapper = undefined;
 
 // not owned by us:
 dev: DeviceProxy,
@@ -216,10 +199,7 @@ const FrameData = struct {
 
 pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     // TODO: FIXME: in multiple places here in this function we will leak if error gets thrown
-    const dev_handle = opt.dev;
-    g_dev_wrapper = vk.DeviceWrapper.load(dev_handle, opt.vkGetDeviceProcAddr);
-    var dev = vk.DeviceProxy.init(dev_handle, &g_dev_wrapper);
-
+    const dev = opt.dev;
     // Memory
     // host visible
     var host_coherent: bool = false;
@@ -341,7 +321,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             .size = @sizeOf(f32) * 4,
         }},
     }, opt.vk_alloc);
-    const pipeline = try createPipeline(&dev, pipeline_layout, opt.render_pass, opt.vk_alloc);
+    const pipeline = try createPipeline(dev, pipeline_layout, opt.render_pass, opt.vk_alloc);
 
     const samplers = [_]vk.SamplerCreateInfo{
         .{ // dvui.TextureInterpolation.nearest
@@ -449,60 +429,6 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     // self.dev.destroyRenderPass(self.render_pass_texture_target, self.vk_alloc);
 }
 
-pub fn backend(self: *Self) dvui.Backend {
-    var b = dvui.Backend.init(@as(*dvui.backend, @ptrCast(self)), dvui.backend);
-    {
-        // hijack base backend by replacing vtable with our own
-        // WARNING: this is not safe and asking for trouble, but done to allow only implementing rendering
-        // TODO: figure out how to do this cleanly
-        const implementation = Self;
-        { // manual type checks
-            // When updating dvui: copy paste from dvui.Backend.VTable.I here as RefVTable
-            const Context = Self;
-            const RefVTable = struct {
-                pub const nanoTime = *const fn (ctx: Context) i128;
-                pub const sleep = *const fn (ctx: Context, ns: u64) void;
-
-                pub const begin = *const fn (ctx: Context, arena: std.mem.Allocator) void;
-                pub const end = *const fn (ctx: Context) void;
-
-                pub const pixelSize = *const fn (ctx: Context) dvui.Size.Physical;
-                pub const windowSize = *const fn (ctx: Context) dvui.Size.Natural;
-                pub const contentScale = *const fn (ctx: Context) f32;
-
-                pub const drawClippedTriangles = *const fn (ctx: Context, texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const u16, clipr: ?dvui.Rect.Physical) void;
-
-                pub const textureCreate = *const fn (ctx: Context, pixels: [*]u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) dvui.Texture;
-                pub const textureDestroy = *const fn (ctx: Context, texture: dvui.Texture) void;
-                pub const textureFromTarget = *const fn (ctx: Context, texture: dvui.TextureTarget) dvui.Texture;
-
-                pub const textureCreateTarget = *const fn (ctx: Context, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) error{ OutOfMemory, TextureCreate }!dvui.TextureTarget;
-                pub const textureReadTarget = *const fn (ctx: Context, texture: dvui.TextureTarget, pixels_out: [*]u8) error{TextureRead}!void;
-                pub const renderTarget = *const fn (ctx: Context, texture: ?dvui.TextureTarget) void;
-
-                pub const clipboardText = *const fn (ctx: Context) error{OutOfMemory}![]const u8;
-                pub const clipboardTextSet = *const fn (ctx: Context, text: []const u8) error{OutOfMemory}!void;
-
-                pub const openURL = *const fn (ctx: Context, url: []const u8) error{OutOfMemory}!void;
-                pub const refresh = *const fn (ctx: Context) void;
-            };
-            if (@sizeOf(RefVTable) != @sizeOf(dvui.Backend.VTable.I)) @compileError("Backend not up to date with dvui!");
-            const I = RefVTable; // autofix
-            inline for (@typeInfo(I).@"struct".decls) |decl| {
-                const hasField = @hasDecl(implementation, decl.name);
-                const DeclType = @field(I, decl.name);
-                if (!hasField) @compileError("Backend type " ++ @typeName(implementation) ++ " has no declaration '" ++ decl.name ++ ": " ++ @typeName(DeclType) ++ "'");
-            }
-        }
-        const I = dvui.Backend.VTable.I;
-        inline for (@typeInfo(I).@"struct".decls) |decl| {
-            // DANGER: bypasses type safety here, but it should be cought above as long as its kept up to date
-            @field(b.vtable, decl.name) = @ptrCast(&@field(implementation, decl.name));
-        }
-        return b;
-    }
-}
-
 pub const RenderPassInfo = struct {
     framebuffer: vk.Framebuffer,
     render_area: vk.Rect2D,
@@ -541,19 +467,11 @@ pub fn endFrame(self: *Self) vk.CommandBuffer {
 }
 
 //
-// Backend interface function overrides
+// Dvui backend interface matching functions
 //  see: dvui/Backend.zig
 //
 const Backend = Self;
 
-pub fn nanoTime(self: *Backend) i128 {
-    return self.base_backend.nanoTime();
-}
-pub fn sleep(self: *Backend, ns: u64) void {
-    return self.base_backend.sleep(ns);
-}
-
-//pub const begin = Override.begin;
 pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.Physical) void {
     _ = arena; // autofix
     self.render_target = null;
@@ -591,7 +509,6 @@ pub fn end(self: *Backend) void {
 }
 
 pub fn pixelSize(self: *Backend) Size {
-    // return self.base_backend.pixelSize();
     return .{ .w = @floatFromInt(self.framebuffer_size.width), .h = @floatFromInt(self.framebuffer_size.height) };
 }
 
@@ -759,7 +676,6 @@ pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolatio
     }
 }
 pub fn textureRead(self: *Backend, texture: dvui.Texture, pixels_out: [*]u8, width: u32, height: u32) !void {
-    // return try self.base_backend.textureRead(texture, pixels_out, width, height);
     slog.debug("textureRead({}, {*}, {}x{}) Not implemented!", .{ texture, pixels_out, width, height });
     _ = self; // autofix
     return error.NotSupported;
@@ -777,7 +693,6 @@ pub fn textureDestroy(self: *Backend, texture: dvui.Texture) void {
 
 /// Read pixel data (RGBA) from `texture` into `pixels_out`.
 pub fn textureReadTarget(self: *Backend, texture: dvui.TextureTarget, pixels_out: [*]u8) !void {
-    // return self.base_backend.textureReadTarget(self, texture, pixels_out);
     _ = pixels_out;
     _ = self;
     _ = texture;
@@ -788,7 +703,6 @@ pub fn textureReadTarget(self: *Backend, texture: dvui.TextureTarget, pixels_out
 /// as if made by `textureCreate`.  After this call, texture target will not be
 /// used by dvui.
 pub fn textureFromTarget(self: *Backend, texture: dvui.TextureTarget) dvui.Texture {
-    // return self.base_backend.textureFromTarget(self, texture);
     _ = texture;
     return .{ .ptr = @ptrCast(&self.error_texture), .width = 0, .height = 0 };
 }
@@ -833,18 +747,6 @@ pub fn renderTarget(self: *Backend, texture: dvui.Texture) void {
         dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
     }
 }
-pub fn clipboardText(self: *Backend) error{OutOfMemory}![]const u8 {
-    return self.base_backend.clipboardText();
-}
-pub fn clipboardTextSet(self: *Backend, text: []const u8) error{OutOfMemory}!void {
-    return self.base_backend.clipboardTextSet(text);
-}
-pub fn openURL(self: *Backend, url: []const u8) error{OutOfMemory}!void {
-    return self.base_backend.openURL(url);
-}
-pub fn refresh(self: *Backend) void {
-    return self.base_backend.refresh();
-}
 
 //
 // Private functions
@@ -885,7 +787,7 @@ const Texture = struct {
 };
 
 fn createPipeline(
-    dev: *DeviceProxy,
+    dev: DeviceProxy,
     layout: vk.PipelineLayout,
     render_pass: vk.RenderPass,
     vk_alloc: ?*vk.AllocationCallbacks,

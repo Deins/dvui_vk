@@ -587,8 +587,7 @@ pub fn main() !void {
     defer if (app.deinitFn) |deinitFn| deinitFn();
 
     b.renderer = try VkRenderer.init(b.gpa, .{
-        .vkGetDeviceProcAddr = b.vkc.instance.wrapper.dispatch.vkGetDeviceProcAddr.?,
-        .dev = b.vkc.device.handle,
+        .dev = b.vkc.device,
         .comamnd_pool = b.vkc.cmd_pool,
         .queue = b.vkc.graphics_queue.handle,
         .pdev = b.vkc.physical_device.handle,
