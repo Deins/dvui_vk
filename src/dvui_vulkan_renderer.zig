@@ -43,7 +43,6 @@ const texture_tracing = false; // tace leaks and usage
 /// initialization options, caller still owns all passed in resources
 pub const InitOptions = struct {
     /// vulkan loader entry point for getting Vulkan functions
-    /// we are trying to keep this file independent from user code so we can't share api config (unless we make this whole file generic)
     vkGetDeviceProcAddr: vk.PfnGetDeviceProcAddr,
 
     /// vulkan device
@@ -410,6 +409,11 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     };
     @memset(res.textures, Texture{});
     @memset(res.texture_targets, TextureTarget{});
+
+    // const cmdbuf = try beginSingleTimeCommands(&res);
+    // defer endSingleTimeCommands(&res, cmdbuf) catch unreachable;
+    // res.cmdbuf = cmdbuf;
+    // defer res.cmdbuf = .null_handle;
     res.dummy_texture = try res.createAndUplaodTexture(&[4]u8{ 255, 255, 255, 255 }, 1, 1, .nearest);
     res.error_texture = try res.createAndUplaodTexture(&opt.error_texture_color, 1, 1, .nearest);
     return res;
@@ -553,7 +557,7 @@ pub fn sleep(self: *Backend, ns: u64) void {
 pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.Physical) void {
     _ = arena; // autofix
     self.render_target = null;
-    if (self.cmdbuf == .null_handle) @panic("dvui_vulkan_renderer: Command bufer not set before rendering started!");
+    if (self.cmdbuf == .null_handle) @panic("dvui_vulkan_renderer: Command bufer not set! (missing beginFrame()?)");
 
     const dev = self.dev;
     const cmdbuf = self.cmdbuf;
@@ -1077,11 +1081,11 @@ pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
         .signal_semaphore_count = 0,
         .p_signal_semaphores = null,
     }};
-    try self.dev.queueSubmit(self.queue, 1, &qs, .null_handle);
-    // TODO: is there better way to sync this than stalling the queue? barriers or something
-    self.dev.queueWaitIdle(self.queue) catch |err| {
-        slog.warn("queueWaitIdle failed: {}", .{err});
-    };
+
+    const fence = try self.dev.createFence(&.{}, self.vk_alloc);
+    defer self.dev.destroyFence(fence, self.vk_alloc);
+    try self.dev.queueSubmit(self.queue, 1, &qs, fence);
+    std.debug.assert(try self.dev.waitForFences(1, &.{fence}, vk.TRUE, std.math.maxInt(u64)) == .success);
 }
 
 pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpolation: dvui.enums.TextureInterpolation) !Texture {
@@ -1187,7 +1191,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
 
     const cmdbuf = try self.beginSingleTimeCommands();
     // TODO: review what error handling should be optimal - if anything fails we should discard cmdbuf not submit it
-    defer self.endSingleTimeCommands(cmdbuf) catch unreachable;
+    defer self.endSingleTimeCommands(cmdbuf) catch unreachable; // submits transfer, waits for it to finish
 
     const srr = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
@@ -1212,7 +1216,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         // try self.endSingleTimeCommands(cmdbuf);
         // cmdbuf = try self.beginSingleTimeCommands();
     }
-    { // copy staging -> img
+    { // copy host staging -> device mem
         const buff_img_copy = vk.BufferImageCopy{
             .buffer_offset = 0,
             .buffer_row_length = 0,
