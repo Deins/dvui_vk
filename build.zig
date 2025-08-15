@@ -55,7 +55,7 @@ pub fn build(b: *Build) !void {
     //
     //   Examples
     const exe = b.addExecutable(.{
-        .name = "dvui_vk_demo",
+        .name = "app_demo",
         .root_source_file = b.path("examples/app.zig"),
         .target = target,
         .optimize = optimize,
@@ -67,10 +67,10 @@ pub fn build(b: *Build) !void {
         exe.subsystem = .Windows;
     }
     b.installArtifact(exe);
-    b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe).step);
+    b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
 
     const exe_standalone = b.addExecutable(.{
-        .name = "dvui_vk_demo",
+        .name = "standalone_demo",
         .root_source_file = b.path("examples/standalone.zig"),
         .target = target,
         .optimize = optimize,
@@ -82,7 +82,7 @@ pub fn build(b: *Build) !void {
         exe_standalone.subsystem = .Windows;
     }
     b.installArtifact(exe_standalone);
-    b.step("run-standalone", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
+    b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
 
     { // Shaders
         const Shader = struct {
@@ -190,7 +190,10 @@ pub fn build(b: *Build) !void {
             // exe_unit_tests.root_module.addAnonymousImport(shader.name, .{
             //     .root_source_file = shader.path,
             // });
-            if (shader.step) |step| exe.step.dependOn(step);
+            if (shader.step) |step| {
+                exe.step.dependOn(step);
+                exe_standalone.step.dependOn(step);
+            }
             // if (shader.step) |step| exe_unit_tests.step.dependOn(step);
         }
     }

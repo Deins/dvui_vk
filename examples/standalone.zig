@@ -8,6 +8,7 @@ const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else vo
 const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
 const SyncObjects = DvuiVkBackend.SyncObjects;
+const slog = std.log.scoped(.main);
 
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
@@ -17,11 +18,12 @@ pub const AppState = struct {
 };
 pub var g_app_state: AppState = undefined;
 
-pub const max_frames_in_flight = 2;
+pub const max_frames_in_flight = 3;
 pub const vsync = true;
 
 pub fn main() !void {
     dvui.Backend.Common.windowsAttachConsole() catch {};
+    dvui.Examples.show_demo_window = true;
 
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = gpa_instance.allocator();
@@ -100,6 +102,7 @@ pub fn main() !void {
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
     main_loop: while (b.contexts.items.len > 0) {
         defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
+        // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
                 for (b.contexts.items) |ctx| {

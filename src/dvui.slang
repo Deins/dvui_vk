@@ -20,7 +20,7 @@ struct ScreenTransform
 [[push_constant]]
 ConstantBuffer<ScreenTransform> screen_transform;
 
-layout(binding = 1) // i had some trouble binding glsl code to texture1, so this is here just to maintain compatibility
+layout(binding = 1) // .glsl shaders had trouble binding texture0, so this is here just to maintain compatibility
 Sampler2D texture_sampler;
 
 [shader("vertex")]

@@ -57,13 +57,10 @@ pub const InitOptions = struct {
     max_indices_per_frame: u32 = 1024 * 128,
     max_vertices_per_frame: u32 = 1024 * 64,
 
-    /// Maximum number of alive textures supported. global (across all overlapping frames)
+    /// Maximum number of alive textures supported including render targets. global - across all frames in flight
+    /// Overflow should be safe but will lead to heavy visual artifacts as font etc. textures can get evicted
     /// Note: as this is only book keeping limit it can be set quite high. Real texture memory usage could be more concerning, as well as large allocation count.
     max_textures: TextureIdx = 256,
-
-    /// Maximum number of render textures
-    /// NOTE: render textures are also textures so consume max_textures budget as well when actually created
-    max_texture_targets: TextureIdx = 64,
 
     /// error and invalid texture handle color
     /// if by any chance renderer runs out of textures or due to other reason fails to create a texture then this color will be used as texture
@@ -94,11 +91,11 @@ pub const InitOptions = struct {
 /// just simple debug and informative metrics
 pub const Stats = struct {
     // per frame
-    draw_calls: u16 = 0,
+    draw_calls: u32 = 0,
     verts: u32 = 0,
     indices: u32 = 0,
     // global
-    textures_alive: u16 = 0,
+    textures_alive: u16 = 0, // including render targets
     textures_mem: usize = 0,
 };
 
@@ -114,18 +111,20 @@ cpool: vk.CommandPool = .null_handle,
 cpool_lock: ?LockCallbacks = null,
 
 // owned by us
-// render_pass_texture_target: vk.RenderPass,
 samplers: [2]vk.Sampler,
 frames: []FrameData,
 textures: []Texture,
-texture_targets: []TextureTarget,
 destroy_textures_offset: TextureIdx = 0,
 destroy_textures: []TextureIdx,
 pipeline: vk.Pipeline,
 pipeline_layout: vk.PipelineLayout,
 dset_layout: vk.DescriptorSetLayout,
-render_target: ?vk.CommandBuffer = null,
 current_frame: *FrameData, // points somewhere in frames
+
+/// if set render to render texture instead of default cmdbuf
+render_target: ?vk.CommandBuffer = null,
+render_target_pass: vk.RenderPass,
+render_target_pipeline: vk.Pipeline,
 
 win_extent: vk.Extent2D = undefined,
 dummy_texture: Texture = undefined, // dummy/null white texture
@@ -308,8 +307,6 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         },
         opt.vk_alloc,
     );
-
-    // const render_pass_texture_target = try createRenderPass(dev, img_format);
     const pipeline_layout = try dev.createPipelineLayout(&.{
         .flags = .{},
         .set_layout_count = 1,
@@ -360,6 +357,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         },
     };
 
+    const render_target_pass = try createOffscreenRenderPass(dev, img_format);
     var res: Self = .{
         .dev = dev,
         .dpool = dpool,
@@ -372,9 +370,9 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             try dev.createSampler(&samplers[1], opt.vk_alloc),
         },
         .textures = try alloc.alloc(Texture, opt.max_textures),
-        .texture_targets = try alloc.alloc(TextureTarget, opt.max_texture_targets),
         .destroy_textures = try alloc.alloc(u16, opt.max_textures),
-        // .render_pass_texture_target = render_pass_texture_target,
+        .render_target_pass = render_target_pass,
+        .render_target_pipeline = try createPipeline(dev, pipeline_layout, render_target_pass, opt.vk_alloc),
         .pipeline = pipeline,
         .pipeline_layout = pipeline_layout,
         .host_vis_mem_idx = host_vis_mem_type_index,
@@ -388,12 +386,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .current_frame = &frames[0],
     };
     @memset(res.textures, Texture{});
-    @memset(res.texture_targets, TextureTarget{});
 
-    // const cmdbuf = try beginSingleTimeCommands(&res);
-    // defer endSingleTimeCommands(&res, cmdbuf) catch unreachable;
-    // res.cmdbuf = cmdbuf;
-    // defer res.cmdbuf = .null_handle;
     res.dummy_texture = try res.createAndUplaodTexture(&[4]u8{ 255, 255, 255, 255 }, 1, 1, .nearest);
     res.error_texture = try res.createAndUplaodTexture(&opt.error_texture_color, 1, 1, .nearest);
     return res;
@@ -401,11 +394,6 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
 
 /// for sync safety, better call queueWaitIdle before destruction
 pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
-    for (self.texture_targets) |tt| if (!tt.isNull()) {
-        self.textureDestroy(.{ .ptr = &self.textures[tt.tex_idx], .width = 0, .height = 0 });
-        self.dev.destroyFramebuffer(tt.framebuffer, self.vk_alloc);
-    };
-    alloc.free(self.texture_targets);
     for (self.frames) |*f| f.deinit(self);
     alloc.free(self.frames);
     for (self.textures, 0..) |tex, i| if (!tex.isNull()) {
@@ -513,7 +501,6 @@ pub fn pixelSize(self: *Backend) Size {
 }
 
 pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []const Vertex, idx: []const Indice, clipr: ?dvui.Rect.Physical) void {
-    if (self.render_target != null) return; // TODO: render to textures
     const texture: ?*anyopaque = if (texture_) |t| @as(*anyopaque, @alignCast(@ptrCast(t.ptr))) else null;
     const dev = self.dev;
     const cmdbuf = if (self.render_target) |t| t else self.cmdbuf;
@@ -619,66 +606,56 @@ pub fn textureCreate(self: *Backend, pixels: [*]const u8, width: u32, height: u3
     //slog.debug("textureCreate {} ({x}) | {}", .{ slot, @intFromPtr(out_tex), self.stats.textures_alive });
     return .{ .ptr = @ptrCast(out_tex), .width = width, .height = height };
 }
-pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !dvui.Texture {
-    const enable = false;
-    if (!enable) return error.NotSupported else {
-        const target_slot = blk: {
-            for (self.texture_targets, 0..) |*tt, s| {
-                if (tt.isNull()) break :blk s;
-            }
-            slog.err("textureCreateTarget: Out of texture target slots! Texture discarded.", .{});
-            return error.OutOfTextureTargets;
-        };
-        const tex_slot = self.findEmptyTextureSlot() orelse return error.OutOfTextures;
 
-        const dev = self.dev;
-        const tex = self.createTextureWithMem(.{
-            .image_type = .@"2d",
-            .format = img_format,
-            .extent = .{ .width = width, .height = height, .depth = 1 },
-            .mip_levels = 1,
-            .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
-            .tiling = .optimal,
-            .usage = .{
-                .color_attachment_bit = true,
-                .sampled_bit = true,
-            },
-            .sharing_mode = .exclusive,
-            .initial_layout = .undefined,
-        }, interpolation) catch |err| {
-            slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
-            return err;
-        };
-        errdefer tex.deinit(self);
+pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) GenericError!dvui.TextureTarget {
+    const tex_slot = self.findEmptyTextureSlot() orelse return error.OutOfMemory;
 
-        const fb = dev.createFramebuffer(&.{
-            .flags = .{},
-            .render_pass = self.render_pass_texture_target,
-            .attachment_count = 1,
-            .p_attachments = @ptrCast(&tex.img_view),
-            .width = width,
-            .height = height,
-            .layers = 1,
-        }, self.vk_alloc) catch |err| {
-            slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
-            return err;
-        };
-        errdefer dev.destroyFramebuffer(fb, self.vk_alloc);
+    const dev = self.dev;
+    var tex = self.createTextureWithMem(.{
+        .image_type = .@"2d",
+        .format = img_format,
+        .extent = .{ .width = width, .height = height, .depth = 1 },
+        .mip_levels = 1,
+        .array_layers = 1,
+        .samples = .{ .@"1_bit" = true },
+        .tiling = .optimal,
+        .usage = .{
+            .color_attachment_bit = true,
+            .sampled_bit = true,
+        },
+        .sharing_mode = .exclusive,
+        .initial_layout = .undefined,
+    }, interpolation) catch |err| {
+        if (enable_breakpoints) @breakpoint();
+        slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
+        return error.BackendError;
+    };
+    errdefer tex.deinit(self);
 
-        self.textures[tex_slot] = tex;
-        self.texture_targets[target_slot] = TextureTarget{
-            .tex_idx = tex_slot,
-            .framebuffer = fb,
-            .fb_size = .{ .width = width, .height = height },
-        };
-        return &self.texture_targets[target_slot];
-    }
+    tex.framebuffer = dev.createFramebuffer(&.{
+        .flags = .{},
+        .render_pass = self.render_target_pass,
+        .attachment_count = 1,
+        .p_attachments = @ptrCast(&tex.img_view),
+        .width = width,
+        .height = height,
+        .layers = 1,
+    }, self.vk_alloc) catch |err| {
+        if (enable_breakpoints) @breakpoint();
+        slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
+        return error.BackendError;
+    };
+    errdefer dev.destroyFramebuffer(tex.framebuffer, self.vk_alloc);
+
+    self.textures[tex_slot] = tex;
+    self.stats.textures_alive += 1;
+    self.stats.textures_mem += self.dev.getImageMemoryRequirements(tex.img).size;
+    return .{ .ptr = &self.textures[tex_slot], .width = width, .height = height };
 }
 pub fn textureRead(self: *Backend, texture: dvui.Texture, pixels_out: [*]u8, width: u32, height: u32) !void {
     slog.debug("textureRead({}, {*}, {}x{}) Not implemented!", .{ texture, pixels_out, width, height });
     _ = self; // autofix
-    return error.NotSupported;
+    return error.NotImplemented;
 }
 pub fn textureDestroy(self: *Backend, texture: dvui.Texture) void {
     if (texture.ptr == invalid_texture) return;
@@ -692,82 +669,98 @@ pub fn textureDestroy(self: *Backend, texture: dvui.Texture) void {
 }
 
 /// Read pixel data (RGBA) from `texture` into `pixels_out`.
-pub fn textureReadTarget(self: *Backend, texture: dvui.TextureTarget, pixels_out: [*]u8) !void {
+pub fn textureReadTarget(self: *Backend, texture: dvui.TextureTarget, pixels_out: [*]u8) TextureError!void {
+    slog.info("textureReadTarget", .{});
     _ = pixels_out;
     _ = self;
     _ = texture;
-    return error.NotSupported;
+    return error.NotImplemented;
 }
 
 /// Convert texture target made with `textureCreateTarget` into return texture
 /// as if made by `textureCreate`.  After this call, texture target will not be
 /// used by dvui.
-pub fn textureFromTarget(self: *Backend, texture: dvui.TextureTarget) dvui.Texture {
-    _ = texture;
-    return .{ .ptr = @ptrCast(&self.error_texture), .width = 0, .height = 0 };
+pub fn textureFromTarget(self: *Backend, texture_target: dvui.TextureTarget) dvui.Texture {
+    _ = self; // autofix
+    return .{ .ptr = texture_target.ptr, .width = texture_target.width, .height = texture_target.height };
 }
 
-pub fn renderTarget(self: *Backend, texture: dvui.Texture) void {
+pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) GenericError!void {
     // TODO: all errors are set to unreachable, add handling?
-    slog.debug("renderTarget({?})", .{texture});
     const dev = self.dev;
+    const srr = vk.ImageSubresourceRange{
+        .aspect_mask = .{ .color_bit = true },
+        .base_mip_level = 0,
+        .level_count = 1,
+        .base_array_layer = 0,
+        .layer_count = 1,
+    };
+    _ = srr; // autofix
 
     if (self.render_target) |cmdbuf| { // finalize previous render target
         self.render_target = null;
         dev.cmdEndRenderPass(cmdbuf);
+        // TODO: transition to shader_src_optimal
         self.endSingleTimeCommands(cmdbuf) catch unreachable;
+        return;
     }
 
-    const tt: *TextureTarget = @ptrCast(@alignCast(texture.ptr));
+    const texture: *Texture = if (dvui_texture_target) |t| @ptrCast(@alignCast(t.ptr)) else return;
     const cmdbuf = self.beginSingleTimeCommands() catch unreachable;
-    self.render_target = cmdbuf;
 
+    const w: f32 = @floatFromInt(self.framebuffer_size.width); // @floatFromInt(tt.fb_size.width)
+    const h: f32 = @floatFromInt(self.framebuffer_size.height); // @floatFromInt(tt.fb_size.height)
     { // begin render-pass & reset viewport
+        dev.cmdBindPipeline(cmdbuf, .graphics, self.render_target_pipeline);
         const clear = vk.ClearValue{
             .color = .{ .float_32 = .{ 0, 0, 0, 0 } },
         };
         const viewport = vk.Viewport{
             .x = 0,
             .y = 0,
-            .width = @floatFromInt(tt.fb_size.width),
-            .height = @floatFromInt(tt.fb_size.height),
+            .width = w,
+            .height = h,
             .min_depth = 0,
             .max_depth = 1,
         };
+
         dev.cmdBeginRenderPass(cmdbuf, &.{
-            .render_pass = self.render_pass_texture_target,
-            .framebuffer = tt.framebuffer,
+            .render_pass = self.render_target_pass,
+            .framebuffer = texture.framebuffer,
             .render_area = vk.Rect2D{
                 .offset = .{ .x = 0, .y = 0 },
-                .extent = tt.fb_size,
+                .extent = .{ .width = dvui_texture_target.?.width, .height = dvui_texture_target.?.height },
             },
             .clear_value_count = 1,
             .p_clear_values = @ptrCast(&clear),
         }, .@"inline");
         dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
     }
+
+    const PushConstants = struct {
+        view_scale: @Vector(2, f32),
+        view_translate: @Vector(2, f32),
+    };
+    const push_constants = PushConstants{
+        .view_scale = .{ 2.0 / w, 2.0 / h },
+        .view_translate = .{ -1.0, -1.0 },
+    };
+    dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+
+    self.render_target = cmdbuf; // activate render-texture on success
 }
 
 //
 // Private functions
 // Some can be pub just to allow using them as utils
 //
-
-const TextureTarget = struct {
-    tex_idx: TextureIdx = 0,
-    fb_size: vk.Extent2D = .{ .width = 0, .height = 0 },
-    framebuffer: vk.Framebuffer = .null_handle,
-
-    fn isNull(self: @This()) bool {
-        return self.framebuffer == .null_handle;
-    }
-};
-
 const Texture = struct {
     img: vk.Image = .null_handle,
     img_view: vk.ImageView = .null_handle,
     mem: vk.DeviceMemory = .null_handle,
     dset: vk.DescriptorSet = .null_handle,
+    /// for render-textures only
+    framebuffer: vk.Framebuffer = .null_handle,
 
     trace: Trace = Trace.init,
     const Trace = std.debug.ConfigurableTrace(6, 5, texture_tracing);
@@ -783,6 +776,7 @@ const Texture = struct {
         dev.destroyImageView(tex.img_view, vk_alloc);
         dev.destroyImage(tex.img, vk_alloc);
         dev.freeMemory(tex.mem, vk_alloc);
+        dev.destroyFramebuffer(tex.framebuffer, vk_alloc);
     }
 };
 
@@ -863,7 +857,6 @@ fn createPipeline(
     };
 
     // do premultiplied alpha blending:
-    // const pma_blend = c.SDL_ComposeCustomBlendMode(c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD, c.SDL_BLENDFACTOR_ONE, c.SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA, c.SDL_BLENDOPERATION_ADD);
     const pcbas = vk.PipelineColorBlendAttachmentState{
         .blend_enable = vk.TRUE,
         .src_color_blend_factor = .one,
@@ -987,7 +980,7 @@ pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
     const fence = try self.dev.createFence(&.{}, self.vk_alloc);
     defer self.dev.destroyFence(fence, self.vk_alloc);
     try self.dev.queueSubmit(self.queue, 1, &qs, fence);
-    std.debug.assert(try self.dev.waitForFences(1, &.{fence}, vk.TRUE, std.math.maxInt(u64)) == .success);
+    if (try self.dev.waitForFences(1, &.{fence}, vk.TRUE, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
 }
 
 pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpolation: dvui.enums.TextureInterpolation) !Texture {
@@ -1060,9 +1053,8 @@ pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpo
 }
 
 pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !Texture {
-    //slog.info("img {}x{}; req size {}", .{ width, height, mreq.size });
+    //slog.debug("img {}x{}; req size {}", .{ width, height, mreq.size });
     const tex = try self.createTextureWithMem(.{
-        //.format = .b8g8r8_unorm,
         .image_type = .@"2d",
         .format = img_format,
         .extent = .{ .width = width, .height = height, .depth = 1 },
@@ -1092,8 +1084,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
     defer dev.freeMemory(img_staging.mem, self.vk_alloc);
 
     const cmdbuf = try self.beginSingleTimeCommands();
-    // TODO: review what error handling should be optimal - if anything fails we should discard cmdbuf not submit it
-    defer self.endSingleTimeCommands(cmdbuf) catch unreachable; // submits transfer, waits for it to finish
+    errdefer dev.resetCommandBuffer(cmdbuf, .{});
 
     const srr = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
@@ -1114,9 +1105,6 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .subresource_range = srr,
         };
         dev.cmdPipelineBarrier(cmdbuf, .{ .host_bit = true, .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
-
-        // try self.endSingleTimeCommands(cmdbuf);
-        // cmdbuf = try self.beginSingleTimeCommands();
     }
     { // copy host staging -> device mem
         const buff_img_copy = vk.BufferImageCopy{
@@ -1133,9 +1121,6 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .image_extent = .{ .width = width, .height = height, .depth = 1 },
         };
         dev.cmdCopyBufferToImage(cmdbuf, img_staging.buf, tex.img, .transfer_dst_optimal, 1, @ptrCast(&buff_img_copy));
-
-        // try self.endSingleTimeCommands(cmdbuf);
-        // cmdbuf = try self.beginSingleTimeCommands();
     }
     { // transition to read only optimal
         const img_barrier = vk.ImageMemoryBarrier{
@@ -1149,15 +1134,13 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .subresource_range = srr,
         };
         dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
-
-        // try self.endSingleTimeCommands(cmdbuf);
-        // cmdbuf = try self.beginSingleTimeCommands();
     }
 
+    self.endSingleTimeCommands(cmdbuf) catch unreachable; // submits transfer, waits for it to finish
     return tex;
 }
 
-pub fn createRenderPass(dev: DeviceProxy, format: vk.Format) !vk.RenderPass {
+pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.RenderPass {
     var subpasses: [1]vk.SubpassDescription = undefined;
     var color_attachments: [1]vk.AttachmentDescription = undefined;
 
@@ -1183,29 +1166,26 @@ pub fn createRenderPass(dev: DeviceProxy, format: vk.Format) !vk.RenderPass {
         };
     }
 
-    // { // texture render targets
-    //     for (1..subpasses.len) |i| {
-    //         color_attachments[i] = vk.AttachmentDescription{
-    //             .format = img_format,
-    //             .samples = .{ .@"1_bit" = true },
-    //             .load_op = .clear, // TODO: .dont_care?
-    //             .store_op = .store,
-    //             .stencil_load_op = .dont_care,
-    //             .stencil_store_op = .dont_care,
-    //             .initial_layout = .undefined,
-    //             .final_layout = .color_attachment_optimal, // .read_only_optimal, // TODO: review
-    //         };
-    //         const rt_color_attachment_ref = [_]vk.AttachmentReference{.{
-    //             .attachment = @intCast(i),
-    //             .layout = .color_attachment_optimal,
-    //         }};
-    //         subpasses[i] = vk.SubpassDescription{
-    //             .pipeline_bind_point = .graphics,
-    //             .color_attachment_count = rt_color_attachment_ref.len,
-    //             .p_color_attachments = &rt_color_attachment_ref,
-    //         };
-    //     }
-    // }
+    const deps = [2]vk.SubpassDependency{
+        .{
+            .src_subpass = vk.SUBPASS_EXTERNAL,
+            .dst_subpass = 0,
+            .src_stage_mask = .{ .fragment_shader_bit = true },
+            .dst_stage_mask = .{ .color_attachment_output_bit = true },
+            .src_access_mask = .{},
+            .dst_access_mask = .{ .color_attachment_read_bit = true, .color_attachment_write_bit = true },
+            .dependency_flags = .{ .by_region_bit = true },
+        },
+        .{
+            .src_subpass = 0,
+            .dst_subpass = vk.SUBPASS_EXTERNAL,
+            .src_stage_mask = .{ .color_attachment_output_bit = true },
+            .dst_stage_mask = .{ .fragment_shader_bit = true },
+            .src_access_mask = .{ .color_attachment_read_bit = true, .color_attachment_write_bit = true },
+            .dst_access_mask = .{},
+            .dependency_flags = .{ .by_region_bit = true },
+        },
+    };
 
     return try dev.createRenderPass(&.{
         .attachment_count = @intCast(color_attachments.len),
@@ -1213,7 +1193,7 @@ pub fn createRenderPass(dev: DeviceProxy, format: vk.Format) !vk.RenderPass {
         .subpass_count = @intCast(subpasses.len),
         .p_subpasses = &subpasses,
         .dependency_count = 0,
-        .p_dependencies = null, //@ptrCast(&dep),
+        .p_dependencies = @ptrCast(&deps),
     }, null);
 }
 
@@ -1247,12 +1227,11 @@ const VertexBindings = struct {
 };
 
 pub const tex_binding = 1; // shader binding slot must match shader
-// pub const ubo_binding = 0; // uniform binding slot must match shader
-// const Uniform = extern struct {
-//     viewport_size: @Vector(2, f32),
-// };
 
 /// device memory min alignment
 /// we could query it at runtime, but this is reasonable safe number. We don't use this for anything critical.
 /// https://vulkan.gpuinfo.org/displaydevicelimit.php?name=minMemoryMapAlignment&platform=all
 const vk_alignment = if (builtin.target.os.tag.isDarwin()) 16384 else 4096;
+
+pub const GenericError = std.mem.Allocator.Error || error{BackendError};
+pub const TextureError = GenericError || error{ TextureCreate, TextureRead, TextureUpdate, NotImplemented };

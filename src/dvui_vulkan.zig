@@ -4,7 +4,7 @@ pub const dvui = @import("dvui");
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_backend);
 
-pub const max_frames_in_flight = 2;
+pub const max_frames_in_flight = 3;
 
 pub const InitOptions = struct {
     /// [windows os only] A windows class that has previously been registered via RegisterClass.
@@ -411,37 +411,26 @@ pub fn textureDestroy(ch: ContextHandle, texture: dvui.Texture) void {
 
 /// Create a `dvui.Texture` that can be rendered to with `renderTarget`.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreateTarget(self: ContextHandle, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) TextureError!dvui.TextureTarget {
-    _ = self; // autofix
-    _ = width; // autofix
-    _ = height; // autofix
-    _ = interpolation; // autofix
-    return TextureError.NotImplemented;
+pub fn textureCreateTarget(ch: ContextHandle, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) TextureError!dvui.TextureTarget {
+    return ch.renderer().textureCreateTarget(width, height, interpolation);
 }
 
 /// Read pixel data (RGBA) from `texture` into `pixels_out`.
-pub fn textureReadTarget(self: ContextHandle, texture: dvui.TextureTarget, pixels_out: [*]u8) TextureError!void {
-    _ = self; // autofix
-    _ = texture; // autofix
-    _ = pixels_out; // autofix
-    return TextureError.NotImplemented;
+pub fn textureReadTarget(ch: ContextHandle, texture: dvui.TextureTarget, pixels_out: [*]u8) TextureError!void {
+    return ch.renderer().textureReadTarget(texture, pixels_out);
 }
 
 /// Convert texture target made with `textureCreateTarget` into return texture
 /// as if made by `textureCreate`.  After this call, texture target will not be
 /// used by dvui.
-pub fn textureFromTarget(self: ContextHandle, texture: dvui.TextureTarget) TextureError!dvui.Texture {
-    _ = self; // autofix
-    _ = texture; // autofix
-    return TextureError.NotImplemented;
+pub fn textureFromTarget(ch: ContextHandle, texture: dvui.TextureTarget) TextureError!dvui.Texture {
+    return ch.renderer().textureFromTarget(texture);
 }
 
 /// Render future `drawClippedTriangles` to the passed `texture` (or screen
 /// if null).
-pub fn renderTarget(self: ContextHandle, texture: ?dvui.TextureTarget) GenericError!void {
-    _ = self; // autofix
-    _ = texture; // autofix
-    return error.BackendError;
+pub fn renderTarget(ch: ContextHandle, texture: ?dvui.TextureTarget) GenericError!void {
+    return ch.renderer().renderTarget(texture);
 }
 
 /// Get clipboard content (text only)
