@@ -126,7 +126,6 @@ render_target: ?vk.CommandBuffer = null,
 render_target_pass: vk.RenderPass,
 render_target_pipeline: vk.Pipeline,
 
-win_extent: vk.Extent2D = undefined,
 dummy_texture: Texture = undefined, // dummy/null white texture
 error_texture: Texture = undefined,
 
@@ -134,7 +133,6 @@ host_vis_mem_idx: u32,
 host_vis_mem: vk.DeviceMemory,
 host_vis_coherent: bool,
 host_vis_data: []u8, // mapped host_vis_mem
-//host_vis_offset: usize = 0, // linearly advaces and wraps to 0 - assumes size is large enough to not overwrite old still in flight data
 device_local_mem_idx: u32,
 
 framebuffer_size: vk.Extent2D = .{ .width = 0, .height = 0 },
@@ -469,8 +467,6 @@ pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.
     const cmdbuf = self.cmdbuf;
     dev.cmdBindPipeline(cmdbuf, .graphics, self.pipeline);
 
-    const extent: vk.Extent2D = .{ .width = @intFromFloat(framebuffer_size.w), .height = @intFromFloat(framebuffer_size.h) };
-    self.win_extent = extent;
     const viewport = vk.Viewport{
         .x = 0,
         .y = 0,
@@ -534,7 +530,7 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
             .extent = .{ .width = @intFromFloat(c.w), .height = @intFromFloat(c.h) },
         } else vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = self.win_extent,
+            .extent = self.framebuffer_size,
         };
         dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
     }
