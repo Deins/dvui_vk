@@ -18,8 +18,7 @@ pub fn init() !void {
         .linux => {
             // use c lib dlopen instead of std.DynLib due to: https://github.com/ziglang/zig/issues/5360
             const path = "libvulkan.so";
-            const RTLD_LAZY = 0x00001;
-            libvulkan = @ptrCast(dlopen(path, RTLD_LAZY));
+            libvulkan = @ptrCast(dlopen(path, .{ .LAZY = true }));
             if (libvulkan == null) {
                 slog.err("dlopen: {s}", .{dlerror() orelse "<UNKNOWN>"});
                 return error.DLOpenFailed;
