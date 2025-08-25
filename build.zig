@@ -42,15 +42,37 @@ pub fn build(b: *Build) !void {
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     dvui_vk_backend.addImport("vk_kickstart", kickstart_mod);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
-    if (target.result.os.tag == .windows) {
-        // const dvui_win = b.createModule(.{ .target = target, .optimize = optimize, .root_source_file = dvui_dep.path("src/backends/dx11.zig") });
-        if (b.lazyDependency("win32", .{})) |zigwin32| {
-            // dvui_win.addImport("win32", zigwin32.module("win32"));
-            dvui_vk_backend.addImport("win32", zigwin32.module("win32"));
-        }
-        // dvui_win.addImport("dvui", dvui_module);
-        // dvui_vk_backend.addImport("dvui_win", dvui_win);
-    } else @panic("TODO");
+    switch (target.result.os.tag) {
+        .windows => {
+            // const dvui_win = b.createModule(.{ .target = target, .optimize = optimize, .root_source_file = dvui_dep.path("src/backends/dx11.zig") });
+            if (b.lazyDependency("win32", .{})) |zigwin32| {
+                // dvui_win.addImport("win32", zigwin32.module("win32"));
+                dvui_vk_backend.addImport("win32", zigwin32.module("win32"));
+            }
+            // dvui_win.addImport("dvui", dvui_module);
+            // dvui_vk_backend.addImport("dvui_win", dvui_win);a
+        },
+        .linux => {
+            if (b.lazyDependency("x11", .{})) |x11| {
+                // dvui_win.addImport("win32", zigwin32.module("win32"));
+                const x11_mod = x11.module("x11");
+                dvui_vk_backend.addImport("x11", x11_mod);
+                // we need c version as well just to get c structs that can be passed to vulkan
+                // const x11_lib = x11.artifact("x11");
+                // dvui_vk_backend.addImport("x11-c", x11_lib.root_module);
+                // // dvui_vk_backend.addImport("x11-c", b.createModule(.{
+                // //     .root_source_file = x11.path("c/x11.zig"),
+                // //     .target = target,
+                // //     .optimize = optimize,
+                // // }));
+                // dvui_vk_backend.linkLibrary(x11_lib);
+                // get helper functions from examples
+                const x11_common = x11.builder.addModule("x11-common", .{ .root_source_file = x11.path("examples/common.zig"), .imports = &.{.{ .name = "x11", .module = x11_mod }} });
+                dvui_vk_backend.addImport("x11-common", x11_common);
+            }
+        },
+        else => @panic("TODO"),
+    }
 
     //
     //   Examples
@@ -69,20 +91,20 @@ pub fn build(b: *Build) !void {
     b.installArtifact(exe);
     b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
 
-    const exe_standalone = b.addExecutable(.{
-        .name = "standalone_demo",
-        .root_source_file = b.path("examples/standalone.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    exe_standalone.root_module.addImport("dvui", dvui_module);
-    exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
-    if (target.result.os.tag == .windows) {
-        exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
-        exe_standalone.subsystem = .Windows;
-    }
-    b.installArtifact(exe_standalone);
-    b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
+    // const exe_standalone = b.addExecutable(.{
+    //     .name = "standalone_demo",
+    //     .root_source_file = b.path("examples/standalone.zig"),
+    //     .target = target,
+    //     .optimize = optimize,
+    // });
+    // exe_standalone.root_module.addImport("dvui", dvui_module);
+    // exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
+    // if (target.result.os.tag == .windows) {
+    //     exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
+    //     exe_standalone.subsystem = .Windows;
+    // }
+    // b.installArtifact(exe_standalone);
+    // b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
 
     { // Shaders
         const Shader = struct {
@@ -184,15 +206,15 @@ pub fn build(b: *Build) !void {
             exe.root_module.addAnonymousImport(shader.name, .{
                 .root_source_file = shader.path,
             });
-            exe_standalone.root_module.addAnonymousImport(shader.name, .{
-                .root_source_file = shader.path,
-            });
+            // exe_standalone.root_module.addAnonymousImport(shader.name, .{
+            //     .root_source_file = shader.path,
+            // });
             // exe_unit_tests.root_module.addAnonymousImport(shader.name, .{
             //     .root_source_file = shader.path,
             // });
             if (shader.step) |step| {
                 exe.step.dependOn(step);
-                exe_standalone.step.dependOn(step);
+                // exe_standalone.step.dependOn(step);
             }
             // if (shader.step) |step| exe_unit_tests.step.dependOn(step);
         }

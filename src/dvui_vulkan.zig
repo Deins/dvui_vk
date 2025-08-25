@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 pub const dvui = @import("dvui");
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_backend);
+const slog_x11 = std.log.scoped(.x11);
 
 pub const max_frames_in_flight = 3;
 
@@ -53,7 +54,9 @@ pub const Context = struct {
     surface: vk.SurfaceKHR = vk.SurfaceKHR.null_handle,
     swapchain_state: ?SwapchainState = null,
 
-    hwnd: if (builtin.os.tag != .windows) void else win32.HWND,
+    // platform specific handle
+    hwnd: if (builtin.os.tag == .windows) win32.HWND else void,
+    x11_window: if (builtin.os.tag == .linux) X11Context.Window else void,
 
     pub const SwapchainState = struct {
         swapchain: vkk.Swapchain,
@@ -139,11 +142,23 @@ pub const Context = struct {
     };
 
     pub fn createVkSurface(self: *@This(), vk_instance: vk.InstanceProxy) !void {
-        const ci = vk.Win32SurfaceCreateInfoKHR{
-            .hwnd = @ptrCast(self.hwnd),
-            .hinstance = @ptrCast(win32.GetModuleHandleW(null)),
-        };
-        self.surface = try vk_instance.createWin32SurfaceKHR(&ci, self.backend.vkc.alloc);
+        switch (builtin.os.tag) {
+            .windows => {
+                const ci = vk.Win32SurfaceCreateInfoKHR{
+                    .hwnd = @ptrCast(self.hwnd),
+                    .hinstance = @ptrCast(win32.GetModuleHandleW(null)),
+                };
+                self.surface = try vk_instance.createWin32SurfaceKHR(&ci, self.backend.vkc.alloc);
+            },
+            .linux => {
+                const ci = vk.XlibSurfaceCreateInfoKHR{
+                    .dpy = @ptrCast(&g_x11.display),
+                    .window = @intFromEnum(self.x11_window.xid),
+                };
+                self.surface = try vk_instance.createXlibSurfaceKHR(&ci, self.backend.vkc.alloc);
+            },
+            else => @panic("TODO"),
+        }
     }
 
     pub fn deinit(self: *@This()) void {
@@ -327,7 +342,10 @@ pub const TextureError = dvui.Backend.TextureError;
 const is_windows = @import("builtin").target.os.tag == .windows;
 // pub const dvui_win = if (is_windows) @import("dvui_win") else void;
 // pub const win32 = if (is_windows) dvui_win.win32 else void;
-pub const win32 = @import("win32").everything;
+pub const win32 = if (builtin.target.os.tag == .windows) @import("win32").everything else void;
+pub const x11 = if (builtin.target.os.tag == .linux) @import("x11") else void;
+pub const x11_common = if (builtin.target.os.tag == .linux) @import("x11-common") else void;
+// pub const x11_c = if (builtin.target.os.tag == .linux) @import("x11-c") else void;
 
 pub fn dvuiBackend(context: *Context) dvui.Backend {
     return dvui.Backend.init(@alignCast(@ptrCast(context)));
@@ -497,19 +515,13 @@ pub const AppState = struct {
 pub var g_app_state: AppState = undefined;
 
 pub fn main() !void {
-    dvui.Backend.Common.windowsAttachConsole() catch {};
+    if (builtin.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
 
     const app = dvui.App.get() orelse return error.DvuiAppNotDefined;
 
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
-
-    const window_class = win32.L("DvuiWindow");
-    win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-        "RegisterClass",
-        win32.GetLastError(),
-    );
 
     const init_opts = app.config.get();
 
@@ -526,15 +538,36 @@ pub fn main() !void {
         .backend = &b,
         .dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}),
         .hwnd = undefined,
+        .x11_window = undefined,
     };
-    try win.initWindow(window_context, .{
-        .registered_class = window_class,
-        .dvui_gpa = gpa,
-        .gpa = gpa,
-        .size = init_opts.size,
-        .title = init_opts.title,
-        .icon = init_opts.icon,
-    });
+
+    switch (builtin.os.tag) {
+        .windows => {
+            const window_class = win32.L("DvuiWindow");
+            win.RegisterClass(window_class, .{}) catch win32.panicWin32(
+                "RegisterClass",
+                win32.GetLastError(),
+            );
+
+            try win.initWindow(window_context, .{
+                .registered_class = window_class,
+                .dvui_gpa = gpa,
+                .gpa = gpa,
+                .size = init_opts.size,
+                .title = init_opts.title,
+                .icon = init_opts.icon,
+            });
+        },
+        .linux => {
+            g_x11 = X11Context.init(gpa) catch |err| std.debug.panic("Failed to init X11 context: {}", .{err});
+            window_context.x11_window = try g_x11.initWindow(.{});
+        },
+        else => @panic("Platform not supproted"),
+    }
+    defer switch (builtin.os.tag) {
+        .linux => g_x11.deinit(),
+        else => {},
+    };
 
     b.vkc = try VkContext.init(gpa, loader, window_context);
 
@@ -587,22 +620,25 @@ pub fn main() !void {
 
     var current_frame_in_flight: u32 = 0;
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
-    main_loop: while (b.contexts.items.len > 0) {
-        defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
-        switch (win.serviceMessageQueue()) {
-            .queue_empty => {
-                for (b.contexts.items, 0..) |ctx, ctx_i| {
-                    _ = ctx_i; // autofix
-                    // slog.info("frame {} ctx {}", .{ current_frame_in_flight, ctx_i });
-                    try paint(app, g_app_state, ctx, current_frame_in_flight);
-                    b.prev_frame_stats = b.renderer.?.stats;
-                    if (ctx.received_close) {
-                        _ = win32.PostMessageA(ctx.hwnd, win32.WM_CLOSE, 0, 0);
-                        continue;
+
+    if (builtin.target.os.tag == .windows) {
+        main_loop: while (b.contexts.items.len > 0) {
+            defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
+            switch (win.serviceMessageQueue()) {
+                .queue_empty => {
+                    for (b.contexts.items, 0..) |ctx, ctx_i| {
+                        _ = ctx_i; // autofix
+                        // slog.info("frame {} ctx {}", .{ current_frame_in_flight, ctx_i });
+                        try paint(app, g_app_state, ctx, current_frame_in_flight);
+                        b.prev_frame_stats = b.renderer.?.stats;
+                        if (ctx.received_close) {
+                            _ = win32.PostMessageA(ctx.hwnd, win32.WM_CLOSE, 0, 0);
+                            continue;
+                        }
                     }
-                }
-            },
-            .quit => break :main_loop,
+                },
+                .quit => break :main_loop,
+            }
         }
     }
 }
@@ -1493,3 +1529,301 @@ pub const win = if (is_windows) struct {
         };
     }
 } else void;
+
+pub const X11Context = if (builtin.target.os.tag != .linux) void else struct {
+    conn: x11_common.ConnectResult,
+    screen: *x11.Screen,
+    sequence: u16 = 0,
+    // xid_base given by server, client allocates new ids incrementally using xid_next
+    // we are using minimal amount of xids so we don't bother tracking freed ones, otherwise destroyed xids should be reused
+    xid_base: x11.ResourceBase,
+    xid_next: u32 = 0,
+
+    display: x11.ParsedDisplay,
+
+    pub const Window = struct {
+        xid: x11.Resource,
+    };
+
+    pub fn init(alloc: std.mem.Allocator) !X11Context {
+        try x11.wsaStartup();
+        const conn = try x11_common.connect(alloc);
+        errdefer std.posix.shutdown(conn.sock, .both) catch {};
+
+        const screen = blk: {
+            const fixed = conn.setup.fixed();
+            inline for (@typeInfo(@TypeOf(fixed.*)).@"struct".fields) |field| {
+                std.log.debug("{s}: {any}", .{ field.name, @field(fixed, field.name) });
+            }
+            std.log.debug("vendor: {s}", .{try conn.setup.getVendorSlice(fixed.vendor_len)});
+            const format_list_offset = x11.ConnectSetup.getFormatListOffset(fixed.vendor_len);
+            const format_list_limit = x11.ConnectSetup.getFormatListLimit(format_list_offset, fixed.format_count);
+            std.log.debug("fmt list off={} limit={}", .{ format_list_offset, format_list_limit });
+            const formats = try conn.setup.getFormatList(format_list_offset, format_list_limit);
+            for (formats, 0..) |format, i| {
+                std.log.debug("format[{}] depth={:3} bpp={:3} scanpad={:3}", .{ i, format.depth, format.bits_per_pixel, format.scanline_pad });
+            }
+            const screen = conn.setup.getFirstScreenPtr(format_list_limit);
+            inline for (@typeInfo(@TypeOf(screen.*)).@"struct".fields) |field| {
+                std.log.debug("SCREEN 0| {s}: {any}", .{ field.name, @field(screen, field.name) });
+            }
+            break :blk screen;
+        };
+
+        return .{
+            .conn = conn,
+            .screen = screen,
+            .xid_base = conn.setup.fixed().resource_id_base,
+            .display = x11.parseDisplay(x11.getDisplay()) catch return error.InvalidDisplay,
+        };
+    }
+    pub fn deinit(self: X11Context) void {
+        std.posix.shutdown(self.conn.sock, .both) catch {};
+    }
+
+    pub fn allocXid(self: *X11Context) x11.Resource {
+        const r = self.xid_base.add(self.xid_next);
+        self.xid_next += 1;
+        return r;
+    }
+
+    pub const WindowOptions = struct {
+        width: u32 = 1024,
+        height: u32 = 720,
+    };
+
+    pub fn initWindow(self: *X11Context, opt: WindowOptions) !Window {
+        const xid_window = self.allocXid();
+        {
+            var msg_buf: [x11.create_window.max_len]u8 = undefined;
+            const len = x11.create_window.serialize(&msg_buf, .{
+                .window_id = xid_window.window(),
+                .parent_window_id = self.screen.root,
+                .depth = 0, // we don't care, just inherit from the parent
+                .x = 0,
+                .y = 0,
+                .width = @intCast(opt.width),
+                .height = @intCast(opt.height),
+                .border_width = 0, // TODO: what is this?
+                .class = .input_output,
+                .visual_id = self.screen.root_visual,
+            }, .{
+                // .bg_pixmap = .copy_from_parent,
+                .bg_pixel = 0xaabbccdd,
+                // .border_pixmap =
+                // .border_pixel = 0x01fa8ec9,
+                // .bit_gravity = .north_west,
+                // .win_gravity = .east,
+                // .backing_store = .when_mapped,
+                // .backing_planes = 0x1234,
+                // .backing_pixel = 0xbbeeeeff,
+                // .override_redirect = true,
+                // .save_under = true,
+                .event_mask = .{
+                    .key_press = 1,
+                    .key_release = 1,
+                    .button_press = 1,
+                    .button_release = 1,
+                    .enter_window = 1,
+                    .leave_window = 1,
+                    .pointer_motion = 1,
+                    .keymap_state = 1,
+                    .exposure = 1,
+                },
+                // .dont_propagate = 1,
+            });
+            try self.conn.sendOne(&self.sequence, msg_buf[0..len]);
+        }
+
+        // {
+        //     var msg_buf: [x11.create_gc.max_len]u8 = undefined;
+        //     const len = x11.create_gc.serialize(&msg_buf, .{
+        //         .gc_id = ids.bg_gc(),
+        //         .drawable_id = ids.window().drawable(),
+        //     }, .{
+        //         .foreground = screen.black_pixel,
+        //     });
+        //     try conn.sendOne(&sequence, msg_buf[0..len]);
+        // }
+        // {
+        //     var msg_buf: [x11.create_gc.max_len]u8 = undefined;
+        //     const len = x11.create_gc.serialize(&msg_buf, .{
+        //         .gc_id = ids.fg_gc(),
+        //         .drawable_id = ids.window().drawable(),
+        //     }, .{
+        //         .background = screen.black_pixel,
+        //         .foreground = 0xffaadd,
+        //     });
+        //     try conn.sendOne(&sequence, msg_buf[0..len]);
+        // }
+        {
+            var msg: [x11.map_window.len]u8 = undefined;
+            x11.map_window.serialize(&msg, xid_window.window());
+            try self.conn.sendOne(&self.sequence, &msg);
+        }
+        return .{ .xid = xid_window };
+    }
+
+    // // we need c compatable struct to create vulkan surface
+    // pub const CDisplay = extern struct {
+    //     fd: c_int, // Network socket.
+    //     proto_major_version: c_int, // major version of server's X protocol
+    //     proto_minor_version: c_int, // minor version of server's X protocol
+    //     default_screen: c_int, // default screen for operations
+    //     nscreens: c_uint, // number of screens on this server
+    //     screens: ?*Screen, // pointer to list of screens
+    // };
+
+    // pub const CScreen = extern struct {
+    //     //XExtData *ext_data;
+    //     display : *CDisplay,
+    //     root : x11.Resource, // window xid
+    //     /*
+    //     int width, height;
+    //     int mwidth, mheight;
+    //     int ndepths;
+    //     Depth *depths;
+    //     int root_depth;
+    //     */
+    //     //Visual *root_visual;
+    //     uint32_t root_visual_num;
+    //     /*
+    //     GC default_gc;
+    //     Colormap cmap;
+    //     */
+    //     unsigned long white_pixel;
+    //     unsigned long black_pixel;
+    //     /*
+    //     int max_maps, min_maps;
+    //     int backing_store;
+    //     Bool save_unders;
+    //     long root_input_mask;
+    //     */
+    // } Screen;
+
+    // pub fn connectSetupAuth(
+    //     display_num: ?x11.DisplayNum,
+    //     sock: std.posix.socket_t,
+    //     auth_filename: []const u8,
+    // ) error{ Reported, OutOfMemory }!?x11.ConnectSetup.Header {
+    //     const auth_mapped = x11.MappedFile.init(auth_filename, .{}) catch |err|
+    //         return reportError("failed to mmap auth file '{s}' with {s}", .{ auth_filename, @errorName(err) });
+    //     defer auth_mapped.unmap();
+
+    //     var auth_filter = x11.AuthFilter{
+    //         .addr = .{ .family = .wild, .data = &[0]u8{} },
+    //         .display_num = display_num,
+    //     };
+
+    //     var addr_buf: [x11.max_sock_filter_addr]u8 = undefined;
+    //     auth_filter.applySocket(sock, &addr_buf) catch |err| {
+    //         std.log.warn("failed to apply socket to auth filter with {s}", .{@errorName(err)});
+    //     };
+
+    //     var auth_it = x11.AuthIterator{ .mem = auth_mapped.mem };
+    //     while (auth_it.next() catch {
+    //         std.log.warn("auth file '{s}' is invalid", .{auth_filename});
+    //         return null;
+    //     }) |entry| {
+    //         if (auth_filter.isFiltered(auth_mapped.mem, entry)) |reason| {
+    //             std.log.debug("ignoring auth because {s} does not match: {}", .{ @tagName(reason), entry.fmt(auth_mapped.mem) });
+    //             continue;
+    //         }
+    //         const name = entry.name(auth_mapped.mem);
+    //         const data = entry.data(auth_mapped.mem);
+    //         const name_x = x11.Slice(u16, [*]const u8){
+    //             .ptr = name.ptr,
+    //             .len = @intCast(name.len),
+    //         };
+    //         const data_x = x11.Slice(u16, [*]const u8){
+    //             .ptr = data.ptr,
+    //             .len = @intCast(data.len),
+    //         };
+
+    //         const msg_len = x11.connect_setup.getLen(name_x.len, data_x.len);
+    //         const msg = try c_allocator.alloc(u8, msg_len);
+    //         defer c_allocator.free(msg);
+    //         x11.connect_setup.serialize(msg.ptr, 11, 0, name_x, data_x);
+    //         sendAll(sock, msg) catch |err|
+    //             return reportError("send connect setup failed with {s}", .{@errorName(err)});
+
+    //         const reader = SocketReader{ .context = sock };
+    //         const connect_setup_header = x11.readConnectSetupHeader(reader, .{}) catch |err|
+    //             return reportError("failed to read connect setup with {s}", .{@errorName(err)});
+    //         switch (connect_setup_header.status) {
+    //             .failed => {
+    //                 std.log.debug("connect setup failed, version={}.{}, reason='{s}'", .{
+    //                     connect_setup_header.proto_major_ver,
+    //                     connect_setup_header.proto_minor_ver,
+    //                     connect_setup_header.readFailReason(reader),
+    //                 });
+    //                 // try the next?
+    //             },
+    //             .authenticate => {
+    //                 std.log.debug("AUTHENTICATE with {} failed", .{entry.fmt(auth_mapped.mem)});
+    //                 // try the next auth
+    //             },
+    //             .success => {
+    //                 // TODO: check version?
+    //                 std.log.debug("SUCCESS! version {}.{}", .{ connect_setup_header.proto_major_ver, connect_setup_header.proto_minor_ver });
+    //                 return connect_setup_header;
+    //             },
+    //             else => |status| return reportError(
+    //                 "expected 0, 1 or 2 as first byte of connect setup reply, but got {}",
+    //                 .{status},
+    //             ),
+    //         }
+    //     }
+
+    //     return null;
+    // }
+
+    // pub fn getCDisplay(self: @This(), alloc: std.mem.Allocator) CDisplay {
+    //     const setup_header = blk: {
+    //         if (x11.getAuthFilename(alloc) catch |err|
+    //             return slog_x11.err("failed to get auth filename with {s}", .{@errorName(err)})) |auth_filename|
+    //         {
+    //             defer auth_filename.deinit(alloc);
+    //             if (try connectSetupAuth(parsed_display.display_num, sock, auth_filename.str)) |hdr|
+    //                 break :blk hdr;
+    //         }
+
+    //         var msg: [x11.connect_setup.getLen(0, 0)]u8 = undefined;
+    //         x11.connect_setup.serialize(&msg, 11, 0, .{ .ptr = undefined, .len = 0 }, .{ .ptr = undefined, .len = 0 });
+    //         sendAll(sock, &msg) catch |err|
+    //             return reportError("send connect setup failed with {s}", .{@errorName(err)});
+
+    //         const reader = SocketReader{ .context = sock };
+    //         const connect_setup_header = x11.readConnectSetupHeader(reader, .{}) catch |err|
+    //             return reportError("failed to read connect setup with {s}", .{@errorName(err)});
+    //         switch (connect_setup_header.status) {
+    //             .failed => {
+    //                 std.log.debug("no auth connect setup failed, version={}.{}, reason='{s}'", .{
+    //                     connect_setup_header.proto_major_ver,
+    //                     connect_setup_header.proto_minor_ver,
+    //                     connect_setup_header.readFailReason(reader),
+    //                 });
+    //             },
+    //             .authenticate => {
+    //                 std.log.debug("no auth connect setup failed with AUTHENTICATE", .{});
+    //             },
+    //             .success => break :blk connect_setup_header,
+    //             else => |status| return reportError(
+    //                 "expected 0, 1 or 2 as first byte of connect setup reply, but got {}",
+    //                 .{status},
+    //             ),
+    //         }
+    //         return reportError("the X server rejected our connect setup message", .{});
+    //     };
+
+    //     return .{
+    //         .fd = self.conn.sock,
+    //         .proto_major_version = sefl.display.proto_major_ver,
+    //         .proto_minor_version = setup_header.proto_minor_ver,
+    //         .default_screen = 0,
+    //         .nscreens = @intCast(fixed.root_screen_count),
+    //         .screens = screens.ptr,
+    //     };
+    // }
+};
+var g_x11: X11Context = undefined;

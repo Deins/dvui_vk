@@ -6,7 +6,7 @@
         .dvui = .{
             // .path = "dvui",
             .url = "git+https://github.com/david-vanderson/dvui.git#5503b3e8994ea4c4dd6a63a0cc86368b7f673b08",
-            .hash = "dvui-0.2.0-AQFJmT-U0gA9Q1cIJJFCUGKjz3D7Up2xu4qGTL0rqMhV",
+            .hash = "dvui-0.2.0-AQFJmbGn0gCi4CH7YZLN7F9bicYPAm_IdIjAKqffryQm",
         },
         .vulkan_zig = .{
             //.path = "deps/vulkan-zig",
@@ -17,10 +17,15 @@
             .url = "git+https://github.com/mikastiv/vk-kickstart.git#760e63d669748213b21d99bfca26561960cad161",
             .hash = "vk_kickstart-0.1.0-YDdE9PM1AQAWR6uCiUkWCf0iOUzrh6GjGAQnCdTbU5wT",
         },
-        // required for windows
+        // lazy, platform specific
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c",
             .hash = "zigwin32-25.0.28-preview-AAAAAHsJ-wPA4nREAzT_OOkF6gLrornNuHqREfHDADoS",
+            .lazy = true,
+        },
+        .x11 = .{
+            .url = "git+https://github.com/marler8997/zigx.git#41212c58d98f6686870876b28d855a84ed5c8a18",
+            .hash = "x11-0.0.0-yWuw5kBpCQBKpEfUeqtzwscGhcWnksB-I3fe24zwSDoV",
             .lazy = true,
         },
     },
