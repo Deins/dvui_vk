@@ -24,13 +24,13 @@ pub fn build(b: *Build) !void {
     });
     const vkzig_bindings = vkzig_dep.module("vulkan-zig");
     // Add vk-kickstart
-    const kickstart_dep = b.dependency("vk_kickstart", .{
+    const kickstart_dep = b.lazyDependency("vk_kickstart", .{
         .registry = vk_registry,
         .enable_validation = if (optimize == .Debug) true else false,
         // .verbose = true,
     });
-    const kickstart_mod = kickstart_dep.module("vk-kickstart");
-    kickstart_mod.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
+    const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
+    if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
 
     // DVUI
     const dvui = @import("dvui");
@@ -40,7 +40,7 @@ pub fn build(b: *Build) !void {
 
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = b.path("src/dvui_vulkan.zig") });
     dvui_vk_backend.addImport("vk", vkzig_bindings);
-    dvui_vk_backend.addImport("vk_kickstart", kickstart_mod);
+    if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
     if (target.result.os.tag == .windows) {
         // const dvui_win = b.createModule(.{ .target = target, .optimize = optimize, .root_source_file = dvui_dep.path("src/backends/dx11.zig") });

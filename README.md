@@ -26,6 +26,8 @@ Renderer alone should be cross-platform. Full 'batteries included' integration:
     * Variable frame rate (sleeping when inactive)
     * Touch events
     * Other misc platform functions such as openURL, clipboard etc.
+* Misc/known issues:
+    * windows: app swapchain resize is not synced to window resize causing small visual jerks. (no easy fix - general issue with vulkan on windows, maybe some hackery is possible to use dx11/12 swapchain instead of vulkan one). standalone example: doesn't have realtime resize implemented.
 
 ## Build & Run
 ### With vulkan sdk (recommended)
@@ -43,4 +45,4 @@ zig build run -Dvk_registry=/path/to/vk.xml -Doptimize=ReleaseFast
 ```
 
 ### App example
-Similar as rest only `zig build run-app`
+Similarly only target `run-app` instead of `run`
