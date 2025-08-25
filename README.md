@@ -11,10 +11,11 @@ Backend is separated in two main parts:
     * [vk_kickstart](https://github.com/mikastiv/vk-kickstart.git)
     * [zigwin32](https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c) (on Windows) 
 
-### Platform support
-* Windows ✔️
-* Linux X11 ❌ (planned in future)
-* Linux Wayland ❌
+### Current platform support
+Renderer alone should be cross-platform. Full 'batteries included' integration:
+* ✔️ Windows
+* ❌ Linux X11
+* ❌ Linux Wayland 
 
 ### todo - not yet implemented 🚧
 * Rendering:

@@ -1,6 +1,7 @@
 .{
     .name = .dvui_vk,
     .version = "0.0.0",
+    .minimum_zig_version = "0.14.0", // tested on 0.14.1
     .fingerprint = 0x8c17814f9967671d,
     .dependencies = .{
         .dvui = .{
