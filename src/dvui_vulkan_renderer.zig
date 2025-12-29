@@ -218,7 +218,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             };
         return error.NoSuitableMemoryType;
     };
-    slog.debug("host_vis allocation size: {}", .{std.fmt.fmtIntSizeBin(opt.hostVisibleMemSize())});
+    slog.debug("host_vis allocation size: {Bi}", .{opt.hostVisibleMemSize()});
     const host_visible_mem = try dev.allocateMemory(&.{
         .allocation_size = opt.hostVisibleMemSize(),
         .memory_type_index = host_vis_mem_type_index,
@@ -327,14 +327,14 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             .address_mode_v = opt.texture_wrap,
             .address_mode_w = opt.texture_wrap,
             .mip_lod_bias = 0,
-            .anisotropy_enable = 0,
+            .anisotropy_enable = .false,
             .max_anisotropy = 0,
-            .compare_enable = 0,
+            .compare_enable = .false,
             .compare_op = .always,
             .min_lod = 0,
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_white,
-            .unnormalized_coordinates = 0,
+            .unnormalized_coordinates = .false,
         },
         .{ // dvui.TextureInterpolation.linear
             .mag_filter = .linear,
@@ -344,14 +344,14 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             .address_mode_v = opt.texture_wrap,
             .address_mode_w = opt.texture_wrap,
             .mip_lod_bias = 0,
-            .anisotropy_enable = 0,
+            .anisotropy_enable = .false,
             .max_anisotropy = 0,
-            .compare_enable = 0,
+            .compare_enable = .false,
             .compare_op = .always,
             .min_lod = 0,
             .max_lod = vk.LOD_CLAMP_NONE,
             .border_color = .int_opaque_white,
-            .unnormalized_coordinates = 0,
+            .unnormalized_coordinates = .false,
         },
     };
 
@@ -497,7 +497,7 @@ pub fn pixelSize(self: *Backend) Size {
 }
 
 pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []const Vertex, idx: []const Indice, clipr: ?dvui.Rect.Physical) void {
-    const texture: ?*anyopaque = if (texture_) |t| @as(*anyopaque, @alignCast(@ptrCast(t.ptr))) else null;
+    const texture: ?*anyopaque = if (texture_) |t| @as(*anyopaque, @ptrCast(@alignCast(t.ptr))) else null;
     const dev = self.dev;
     const cmdbuf = if (self.render_target) |t| t else self.cmdbuf;
     const cf = self.current_frame;
@@ -561,7 +561,7 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
     dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&cf.vtx_buff), &[_]vk.DeviceSize{vtx_offset});
     var dset: vk.DescriptorSet = if (texture == null) self.dummy_texture.dset else blk: {
         if (texture.? == invalid_texture) break :blk self.error_texture.dset;
-        const tex = @as(*Texture, @alignCast(@ptrCast(texture)));
+        const tex = @as(*Texture, @ptrCast(@alignCast(texture)));
         if (tex.trace.index < tex.trace.addrs.len / 2 + 1) tex.trace.addAddr(@returnAddress(), "render"); // if trace has some free room, trace this
         break :blk tex.dset;
     };
@@ -819,7 +819,7 @@ fn createPipeline(
 
     const piasci = vk.PipelineInputAssemblyStateCreateInfo{
         .topology = .triangle_list,
-        .primitive_restart_enable = vk.FALSE,
+        .primitive_restart_enable = .false,
     };
 
     var viewport: vk.Viewport = undefined;
@@ -832,12 +832,12 @@ fn createPipeline(
     };
 
     const prsci = vk.PipelineRasterizationStateCreateInfo{
-        .depth_clamp_enable = vk.FALSE,
-        .rasterizer_discard_enable = vk.FALSE,
+        .depth_clamp_enable = .false,
+        .rasterizer_discard_enable = .false,
         .polygon_mode = .fill,
         .cull_mode = .{ .back_bit = false },
         .front_face = .clockwise,
-        .depth_bias_enable = vk.FALSE,
+        .depth_bias_enable = .false,
         .depth_bias_constant_factor = 0,
         .depth_bias_clamp = 0,
         .depth_bias_slope_factor = 0,
@@ -846,15 +846,15 @@ fn createPipeline(
 
     const pmsci = vk.PipelineMultisampleStateCreateInfo{
         .rasterization_samples = .{ .@"1_bit" = true },
-        .sample_shading_enable = vk.FALSE,
+        .sample_shading_enable = .false,
         .min_sample_shading = 1,
-        .alpha_to_coverage_enable = vk.FALSE,
-        .alpha_to_one_enable = vk.FALSE,
+        .alpha_to_coverage_enable = .false,
+        .alpha_to_one_enable = .false,
     };
 
     // do premultiplied alpha blending:
     const pcbas = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = vk.TRUE,
+        .blend_enable = .true,
         .src_color_blend_factor = .one,
         .dst_color_blend_factor = .one_minus_src_alpha,
         .color_blend_op = .add,
@@ -865,7 +865,7 @@ fn createPipeline(
     };
 
     const pcbsci = vk.PipelineColorBlendStateCreateInfo{
-        .logic_op_enable = vk.FALSE,
+        .logic_op_enable = .false,
         .logic_op = .copy,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&pcbas),
@@ -976,7 +976,7 @@ pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
     const fence = try self.dev.createFence(&.{}, self.vk_alloc);
     defer self.dev.destroyFence(fence, self.vk_alloc);
     try self.dev.queueSubmit(self.queue, 1, &qs, fence);
-    if (try self.dev.waitForFences(1, &.{fence}, vk.TRUE, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
+    if (try self.dev.waitForFences(1, &.{fence}, .true, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
 }
 
 pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpolation: dvui.enums.TextureInterpolation) !Texture {

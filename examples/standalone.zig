@@ -145,7 +145,7 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.Context, current_frame_in_
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
     { // check/wait for previous frame to finish
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), vk.TRUE, std.math.maxInt(u64));
+        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
         std.debug.assert(result == .success);
     }
 

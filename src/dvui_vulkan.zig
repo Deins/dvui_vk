@@ -3,6 +3,9 @@ const builtin = @import("builtin");
 pub const dvui = @import("dvui");
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_backend);
+comptime {
+    _ = @import("dvui_c.zig");
+}
 
 pub const max_frames_in_flight = 3;
 
@@ -30,7 +33,7 @@ comptime {
 }
 /// get real context from handle
 pub inline fn get(ch: ContextHandle) *Context {
-    return @as(*Context, @alignCast(@ptrCast(ch)));
+    return @as(*Context, @ptrCast(@alignCast(ch)));
 }
 // shortcuts
 pub inline fn backend(ch: ContextHandle) *VkBackend {
@@ -163,31 +166,42 @@ pub const Context = struct {
         // defer m.deinit();
         var prc: f32 = 0; // progress bar percent [0..1]
 
-        dvui.labelNoFmt(@src(), "DVUI VK Backend stats", .{}, .{ .expand = .horizontal, .gravity_x = 0.5, .font_style = .heading });
+        const h1 = dvui.Font.theme(.body).larger(-1).withWeight(.bold).withLineHeight(1.1);
+        const h2 = dvui.Font.theme(.body).larger(-2).withWeight(.bold).withLineHeight(1.1);
+        dvui.labelNoFmt(@src(), "DVUI VK Backend stats", .{}, .{ .font = h1, .expand = .horizontal, .gravity_x = 0.5 });
         dvui.label(@src(), "draw_calls:  {}", .{stats.draw_calls}, .{ .expand = .horizontal });
 
         const idx_max = self.backend.renderer.?.current_frame.idx_data.len / @sizeOf(VkRenderer.Indice);
         dvui.label(@src(), "indices: {} / {}", .{ stats.indices, idx_max }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(stats.indices)) / @as(f32, @floatFromInt(idx_max));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
+
+        // we modify highlight color to change progress bar inner color
+        // TODO: custom progress bar?
+        const original_highlight = dvui.themeGet().highlight.fill;
+        defer dvui.currentWindow().theme.highlight.fill = original_highlight;
+
+        dvui.currentWindow().theme.highlight.fill = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100);
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal });
 
         const verts_max = self.backend.renderer.?.current_frame.vtx_data.len / @sizeOf(VkRenderer.Vertex);
         dvui.label(@src(), "vertices:  {} / {}", .{ stats.verts, verts_max }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(stats.verts)) / @as(f32, @floatFromInt(verts_max));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
+        dvui.currentWindow().theme.highlight.fill = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100);
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal });
 
-        dvui.label(@src(), "Textures:", .{}, .{ .expand = .horizontal, .font_style = .caption_heading });
+        dvui.label(@src(), "Textures:", .{}, .{ .font = h2, .expand = .horizontal });
         dvui.label(@src(), "count:  {}", .{stats.textures_alive}, .{ .expand = .horizontal });
-        dvui.label(@src(), "mem (gpu): {:.1}", .{std.fmt.fmtIntSizeBin(stats.textures_mem)}, .{ .expand = .horizontal });
+        dvui.label(@src(), "mem (gpu): {Bi:.1}", .{stats.textures_mem}, .{ .expand = .horizontal });
 
-        dvui.label(@src(), "Static/Preallocated memory (gpu):", .{}, .{ .expand = .horizontal, .font_style = .caption_heading });
+        dvui.label(@src(), "Static/Preallocated memory (gpu):", .{}, .{ .font = h2, .expand = .horizontal });
         const prealloc_mem = self.backend.renderer.?.host_vis_data.len;
-        dvui.label(@src(), "total:  {:.1}", .{std.fmt.fmtIntSizeBin(prealloc_mem)}, .{ .expand = .horizontal });
+        dvui.label(@src(), "total:  {Bi:.1}", .{prealloc_mem}, .{ .expand = .horizontal });
         const prealloc_mem_frame = prealloc_mem / self.backend.renderer.?.frames.len;
         const prealloc_mem_frame_used = stats.indices * @sizeOf(VkRenderer.Indice) + stats.verts * @sizeOf(VkRenderer.Vertex);
-        dvui.label(@src(), "current frame:  {:.1} / {:.1}", .{ std.fmt.fmtIntSizeBin(prealloc_mem_frame_used), std.fmt.fmtIntSizeBin(prealloc_mem_frame) }, .{ .expand = .horizontal });
+        dvui.label(@src(), "current frame:  {Bi:.1} / {Bi:.1}", .{ prealloc_mem_frame_used, prealloc_mem_frame }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(prealloc_mem_frame_used)) / @as(f32, @floatFromInt(prealloc_mem_frame));
-        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal, .color_accent = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100) });
+        dvui.currentWindow().theme.highlight.fill = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100);
+        dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal });
     }
 };
 
@@ -281,10 +295,10 @@ pub const VkContext = struct {
                 // vk.extensions.ext_descriptor_indexing.name,
             },
             .required_features = .{
-                .sampler_anisotropy = vk.TRUE,
+                .sampler_anisotropy = .true,
             },
             .required_features_12 = .{
-                .descriptor_indexing = vk.TRUE,
+                .descriptor_indexing = .true,
             },
         });
 
@@ -330,7 +344,7 @@ const is_windows = @import("builtin").target.os.tag == .windows;
 pub const win32 = @import("win32").everything;
 
 pub fn dvuiBackend(context: *Context) dvui.Backend {
-    return dvui.Backend.init(@alignCast(@ptrCast(context)));
+    return dvui.Backend.init(@ptrCast(@alignCast(context)));
 }
 
 //
@@ -343,7 +357,7 @@ pub fn nanoTime(_: ContextHandle) i128 {
 }
 
 pub fn sleep(_: ContextHandle, ns: u64) void {
-    std.time.sleep(ns);
+    std.Thread.sleep(ns);
 }
 
 /// Called by dvui during `dvui.Window.begin`, so prior to any dvui
@@ -447,7 +461,8 @@ pub fn clipboardTextSet(self: ContextHandle, text: []const u8) GenericError!void
 }
 
 /// Open URL in system browser
-pub fn openURL(self: ContextHandle, url: []const u8) GenericError!void {
+pub fn openURL(self: ContextHandle, url: []const u8, new_window: bool) GenericError!void {
+    _ = new_window; // autofix
     _ = self; // autofix
     _ = url; // autofix
 }
@@ -616,7 +631,7 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
     { // check/wait for previous frame to finish
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), vk.TRUE, std.math.maxInt(u64));
+        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
         std.debug.assert(result == .success);
     }
 
@@ -772,7 +787,7 @@ pub fn createFramebuffers(
         for (framebuffers.items) |framebuffer| {
             device.destroyFramebuffer(framebuffer, null);
         }
-        framebuffers.deinit();
+        framebuffers.deinit(allocator);
     }
 
     for (0..image_count) |i| {
@@ -787,10 +802,10 @@ pub fn createFramebuffers(
         };
 
         const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
-        try framebuffers.append(framebuffer);
+        try framebuffers.append(allocator, framebuffer);
     }
 
-    return framebuffers.toOwnedSlice();
+    return framebuffers.items;
 }
 
 pub fn destroyFramebuffers(allocator: std.mem.Allocator, device: vk.DeviceProxy, framebuffers: []const vk.Framebuffer) void {
@@ -960,7 +975,7 @@ pub const win = if (is_windows) struct {
 
     fn win32ToErr(err: win32.WIN32_ERROR, what: []const u8) !void {
         if (err == win32.NO_ERROR) return;
-        slog.err("{s} failed, error={}", .{ what, err });
+        slog.err("{s} failed, error={f}", .{ what, err });
         return dvui.Backend.GenericError.BackendError;
     }
 
@@ -1041,11 +1056,11 @@ pub const win = if (is_windows) struct {
                 null, // hWndParent
                 null, // hMenu
                 win32.GetModuleHandleW(null), // This message is sent to the created window by this function before it returns.
-                @constCast(@ptrCast(&create_args)),
+                @ptrCast(@constCast(&create_args)),
             ) orelse switch (win32.GetLastError()) {
                 win32.ERROR_CANNOT_FIND_WND_CLASS => switch (builtin.mode) {
                     .Debug => std.debug.panic(
-                        "did you forget to call RegisterClass? (class_name='{}')",
+                        "did you forget to call RegisterClass? (class_name='{f}')",
                         .{std.unicode.fmtUtf16Le(std.mem.span(options.registered_class))},
                     ),
                     else => unreachable,
@@ -1137,7 +1152,7 @@ pub const win = if (is_windows) struct {
         umsg: u32,
         wparam: win32.WPARAM,
         lparam: win32.LPARAM,
-    ) callconv(std.os.windows.WINAPI) win32.LRESULT {
+    ) callconv(.winapi) win32.LRESULT {
         const maybe_context = contextFromHwnd(hwnd);
         if (maybe_context) |ctx| {
             @branchHint(.likely); // only during init state is not available
@@ -1149,7 +1164,7 @@ pub const win = if (is_windows) struct {
             win32.WM_CREATE => {
                 slog.debug("WM_CREATE", .{});
                 const create_struct: *win32.CREATESTRUCTW = @ptrFromInt(@as(usize, @bitCast(lparam)));
-                const args: *CreateWindowArgs = @alignCast(@ptrCast(create_struct.lpCreateParams));
+                const args: *CreateWindowArgs = @ptrCast(@alignCast(create_struct.lpCreateParams));
 
                 // attach our data to window
                 if (0 != win32.SetWindowLongPtrW(hwnd, win32.WINDOW_LONG_PTR_INDEX._USERDATA, @bitCast(@intFromPtr(args.context))))
@@ -1270,7 +1285,7 @@ pub const win = if (is_windows) struct {
                 const x = win32.xFromLparam(lparam);
                 const y = win32.yFromLparam(lparam);
                 _ = dvui_window.addEventMouseMotion(
-                    .{ .x = @floatFromInt(x), .y = @floatFromInt(y) },
+                    .{ .pt = .{ .x = @floatFromInt(x), .y = @floatFromInt(y) } },
                 ) catch {};
                 return true;
             },
@@ -1366,7 +1381,7 @@ pub const win = if (is_windows) struct {
                 const ascii_char: u8 = @truncate(wparam);
                 if (std.ascii.isPrint(ascii_char)) {
                     const string: []const u8 = &.{ascii_char};
-                    _ = dvui_window.addEventText(string) catch {};
+                    _ = dvui_window.addEventText(.{ .text = string }) catch {};
                 }
                 return true;
             },

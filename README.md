@@ -1,7 +1,7 @@
 # Vulkan Backend for dvui
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.2` and `zig v0.14.1`.
+Targeting `vulkan 1.2` and `zig v0.15.1` (see tags for older ver)
 
 Backend is separated in two main parts:
 * [dvui_vulkan_renderer.zig](./src/dvui_vulkan_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc.

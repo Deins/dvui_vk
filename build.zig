@@ -19,14 +19,13 @@ pub fn build(b: *Build) !void {
         std.log.err("VULKAN_SDK not found. Pass in -Dvk_registry=/path/to/vk.xml or install vulkan SDK.", .{});
         break :blk "/usr/share/vulkan/registry/vk.xml"; // best guess
     };
-    const vkzig_dep = b.dependency("vulkan_zig", .{
+    const vkzig_dep = b.dependency("vulkan", .{
         .registry = @as([]const u8, vk_registry),
     });
     const vkzig_bindings = vkzig_dep.module("vulkan-zig");
     // Add vk-kickstart
     const kickstart_dep = b.lazyDependency("vk_kickstart", .{
         .registry = vk_registry,
-        .enable_validation = if (optimize == .Debug) true else false,
         // .verbose = true,
     });
     const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
@@ -34,9 +33,22 @@ pub fn build(b: *Build) !void {
 
     // DVUI
     const dvui = @import("dvui");
-
     const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom });
     const dvui_module = dvui_dep.module("dvui");
+    const stb_source = "vendor/stb/";
+    // dvui deps
+    dvui_module.link_libc = true;
+    dvui_module.addCMacro("INCLUDE_CUSTOM_LIBC_FUNCS", "0");
+    dvui_module.addCSourceFiles(.{
+        .files = &.{
+            stb_source ++ "stb_image_impl.c",
+                // stb_source ++ "stb_image_write_impl.c",
+                // stb_source ++ "stb_image_libc.c",
+                // stb_source ++ "stb_truetype_libc.c",
+                // stb_source ++ "stb_truetype_impl.c",
+        },
+        .flags = &.{ "-DINCLUDE_CUSTOM_LIBC_FUNCS=1", "-DSTBI_NO_STDLIB=1", "-DSTBIW_NO_STDLIB=1" },
+    });
 
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = b.path("src/dvui_vulkan.zig") });
     dvui_vk_backend.addImport("vk", vkzig_bindings);
@@ -54,11 +66,15 @@ pub fn build(b: *Build) !void {
 
     //
     //   Examples
-    const exe = b.addExecutable(.{
-        .name = "app_demo",
+    const exe_mod = b.addModule("app_mod", .{
         .root_source_file = b.path("examples/app.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
+    });
+    const exe = b.addExecutable(.{
+        .name = "app_demo",
+        .root_module = exe_mod,
     });
     exe.root_module.addImport("dvui", dvui_module);
     exe.root_module.addImport("vulkan", vkzig_bindings);
@@ -69,11 +85,14 @@ pub fn build(b: *Build) !void {
     b.installArtifact(exe);
     b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
 
-    const exe_standalone = b.addExecutable(.{
-        .name = "standalone_demo",
+    const exe_standalone_mod = b.addModule("standalone_mod", .{
         .root_source_file = b.path("examples/standalone.zig"),
         .target = target,
         .optimize = optimize,
+    });
+    const exe_standalone = b.addExecutable(.{
+        .name = "standalone_demo",
+        .root_module = exe_standalone_mod,
     });
     exe_standalone.root_module.addImport("dvui", dvui_module);
     exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
@@ -90,7 +109,7 @@ pub fn build(b: *Build) !void {
             path: std.Build.LazyPath,
             step: ?*std.Build.Step = null,
         };
-        var shaders = std.ArrayList(Shader).init(b.allocator);
+        var shaders: std.ArrayList(Shader) = .{};
         const glslc = b.option(bool, "glslc", "Compile glsl shaders") orelse false;
         const slangc = b.option(bool, "slangc", "Compile slang shaders") orelse false;
 
@@ -128,7 +147,7 @@ pub fn build(b: *Build) !void {
                             }) catch unreachable;
                             const out_path = b.pathJoin(&.{ shader_subpath, out_name });
                             if (!slangc) {
-                                shaders.append(.{ .name = out_name, .path = b.path(out_path) }) catch @panic("OOM"); // compilation not requested, just point to output
+                                shaders.append(b.allocator, .{ .name = out_name, .path = b.path(out_path) }) catch @panic("OOM"); // compilation not requested, just point to output
                             } else {
                                 const compile = b.addSystemCommand(&.{
                                     "slangc",
@@ -150,7 +169,7 @@ pub fn build(b: *Build) !void {
 
                                 const gf = b.allocator.create(std.Build.GeneratedFile) catch unreachable;
                                 gf.* = std.Build.GeneratedFile{ .step = &compile.step, .path = out_path };
-                                shaders.append(Shader{ .name = out_name, .path = std.Build.LazyPath{ .generated = .{ .file = gf } } }) catch @panic("OOM");
+                                shaders.append(b.allocator, Shader{ .name = out_name, .path = std.Build.LazyPath{ .generated = .{ .file = gf } } }) catch @panic("OOM");
                             }
                         }
                     }
@@ -159,7 +178,7 @@ pub fn build(b: *Build) !void {
                 if (is_glsl and !slangc) {
                     const out_name = std.mem.join(b.allocator, "", &.{ f.name, ".spv" }) catch unreachable;
                     const out_path = b.pathJoin(&.{ shader_subpath, out_name });
-                    shaders.append(blk: {
+                    shaders.append(b.allocator, blk: {
                         if (!glslc) break :blk Shader{ .name = out_name, .path = b.path(out_path) }; // compilation not requested, just point to output
 
                         const compile = b.addSystemCommand(&.{
