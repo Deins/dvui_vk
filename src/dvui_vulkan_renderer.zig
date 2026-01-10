@@ -16,8 +16,8 @@ const dvui = @import("dvui");
 const vk = @import("vk");
 const Size = dvui.Size;
 
-const vs_spv align(64) = @embedFile("dvui.vert.spv").*;
-const fs_spv align(64) = @embedFile("dvui.frag.spv").*;
+pub const vs_spv align(64) = @embedFile("dvui.vert.spv").*;
+pub const fs_spv align(64) = @embedFile("dvui.frag.spv").*;
 
 const Self = @This();
 
@@ -68,6 +68,11 @@ pub const InitOptions = struct {
 
     /// if uv coords go out of bounds, how should the sampling behave
     texture_wrap: vk.SamplerAddressMode = .repeat,
+
+    /// optionally override pipeline with custom one
+    /// NOTE: currently renderer takes ownership and will destruct the pipeline on deinit. TODO: should we keep track of it and let user destruct it?
+    pipeline: vk.Pipeline = .null_handle,
+    pipeline_layout: vk.PipelineLayout = .null_handle,
 
     /// bytes - total host visible memory allocated ahead of time
     pub inline fn hostVisibleMemSize(s: @This()) u32 {
@@ -285,7 +290,8 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .p_pool_sizes = &dpool_sizes,
         .flags = .{ .free_descriptor_set_bit = true },
     }, opt.vk_alloc);
-    const dsl = try dev.createDescriptorSetLayout(
+    // TODO: free?
+    const dsl = if (opt.pipeline_layout != .null_handle) .null_handle else try dev.createDescriptorSetLayout(
         &vk.DescriptorSetLayoutCreateInfo{
             .binding_count = 1,
             .p_bindings = &.{
@@ -305,7 +311,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         },
         opt.vk_alloc,
     );
-    const pipeline_layout = try dev.createPipelineLayout(&.{
+    const pipeline_layout = if (opt.pipeline_layout != .null_handle) opt.pipeline_layout else try dev.createPipelineLayout(&.{
         .flags = .{},
         .set_layout_count = 1,
         .p_set_layouts = @ptrCast(&dsl),
@@ -316,7 +322,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
             .size = @sizeOf(f32) * 4,
         }},
     }, opt.vk_alloc);
-    const pipeline = try createPipeline(dev, pipeline_layout, opt.render_pass, opt.vk_alloc);
+    errdefer if (opt.pipeline_layout == .null_handle) dev.destroyPipelineLayout(pipeline_layout, opt.vk_alloc);
 
     const samplers = [_]vk.SamplerCreateInfo{
         .{ // dvui.TextureInterpolation.nearest
@@ -356,6 +362,10 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     };
 
     const render_target_pass = try createOffscreenRenderPass(dev, img_format);
+
+    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, render_target_pass, opt.vk_alloc);
+    errdefer if (opt.pipeline == .null_handle) dev.destroyPipeline(pipeline, opt.vk_alloc);
+
     var res: Self = .{
         .dev = dev,
         .dpool = dpool,
@@ -1193,14 +1203,14 @@ pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.Render
     }, null);
 }
 
-const VertexBindings = struct {
-    const binding_description = [_]vk.VertexInputBindingDescription{.{
+pub const VertexBindings = struct {
+    pub const binding_description = [_]vk.VertexInputBindingDescription{.{
         .binding = 0,
         .stride = @sizeOf(Vertex),
         .input_rate = .vertex,
     }};
 
-    const attribute_description = [_]vk.VertexInputAttributeDescription{
+    pub const attribute_description = [_]vk.VertexInputAttributeDescription{
         .{
             .binding = 0,
             .location = 0,

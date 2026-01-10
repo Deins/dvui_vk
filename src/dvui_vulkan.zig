@@ -8,6 +8,8 @@ comptime {
 }
 const zt = @import("ztracy"); // TODO: remove, just for temp debugging
 
+pub const VkRenderer = @import("dvui_vulkan_renderer.zig");
+
 pub const max_frames_in_flight = 3;
 
 pub const InitOptions = struct {
@@ -227,7 +229,6 @@ pub const Context = struct {
     }
 };
 
-pub const VkRenderer = @import("dvui_vulkan_renderer.zig");
 pub const VkBackend = struct {
     gpa: std.mem.Allocator,
     contexts: std.ArrayListUnmanaged(*Context) = .{},
@@ -826,7 +827,8 @@ pub fn createFramebuffers(
     device: vk.DeviceProxy,
     extent: vk.Extent2D,
     image_count: u32,
-    image_views: []vk.ImageView,
+    image_views: []const vk.ImageView,
+    shared_attachments: []const vk.ImageView,
     render_pass: vk.RenderPass,
 ) ![]vk.Framebuffer {
     var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
@@ -838,10 +840,13 @@ pub fn createFramebuffers(
     }
 
     for (0..image_count) |i| {
-        const attachments = [_]vk.ImageView{image_views[i]};
+        std.debug.assert(shared_attachments.len < 16);
+        var attachments = [1]vk.ImageView{.null_handle} ** 16;
+        attachments[0] = image_views[i];
+        for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
         const framebuffer_info = vk.FramebufferCreateInfo{
             .render_pass = render_pass,
-            .attachment_count = attachments.len,
+            .attachment_count = @intCast(1 + shared_attachments.len),
             .p_attachments = &attachments,
             .width = extent.width,
             .height = extent.height,

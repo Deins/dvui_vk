@@ -17,11 +17,74 @@ const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
 const Mat4 = zm.Matrix(4, 4, f32, .{});
 
+pub const DepthBuffer = struct {
+    image: vk.Image,
+    view: vk.ImageView,
+    memory: vk.DeviceMemory,
+    const vk_alloc = null;
+    const format = vk.Format.d32_sfloat;
+
+    pub fn init(dev: vk.DeviceProxy, size: vk.Extent2D, device_local_mem_idx: u32) !DepthBuffer {
+        // createImage( vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal, depthImage, depthImageMemory
+        const image = try dev.createImage(&.{
+            .image_type = .@"2d",
+            .format = format,
+            .extent = .{ .width = size.width, .height = size.height, .depth = 1 },
+            .mip_levels = 1,
+            .array_layers = 1,
+            .samples = .{ .@"1_bit" = true },
+            .tiling = .optimal,
+            .usage = .{
+                // .sampled_bit = true,
+                .depth_stencil_attachment_bit = true,
+            },
+            .sharing_mode = .exclusive,
+            .initial_layout = .undefined,
+        }, vk_alloc);
+        const mem = try dev.allocateMemory(&.{
+            .allocation_size = dev.getImageMemoryRequirements(image).size,
+            .memory_type_index = device_local_mem_idx,
+        }, vk_alloc);
+        try dev.bindImageMemory(image, mem, 0);
+        const view = try dev.createImageView(&.{
+            .flags = .{},
+            .image = image,
+            .view_type = .@"2d",
+            .format = format,
+            .components = .{
+                .r = .identity,
+                .g = .identity,
+                .b = .identity,
+                .a = .identity,
+            },
+            .subresource_range = .{
+                .aspect_mask = .{ .depth_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        }, vk_alloc);
+
+        return .{
+            .image = image,
+            .view = view,
+            .memory = mem,
+        };
+    }
+    pub fn deinit(self: @This(), dev: vk.DeviceProxy) void {
+        dev.destroyImageView(self.view, vk_alloc);
+        dev.destroyImage(self.image, vk_alloc);
+        dev.freeMemory(self.memory, vk_alloc);
+    }
+};
+
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
     render_pass: vk.RenderPass,
     sync: SyncObjects,
     command_buffers: []vk.CommandBuffer,
+    depth_buffer: DepthBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
         const window_class = win32.L("DvuiWindow");
@@ -88,12 +151,30 @@ pub const AppState = struct {
         const sync = try DvuiVkBackend.SyncObjects.init(b.vkc.device);
         errdefer sync.deinit(b.vkc.device);
 
+        const depth_buffer = try DepthBuffer.init(
+            b.vkc.device,
+            .{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
+            b.renderer.?.device_local_mem_idx,
+        );
+        errdefer depth_buffer.deinit(b.vkc.device);
+
         return .{
             .backend = b,
             .command_buffers = command_buffers,
             .render_pass = render_pass,
             .sync = sync,
+            .depth_buffer = depth_buffer,
         };
+    }
+
+    pub fn recreateSwapchain(self: *@This(), ctx: *DvuiVkBackend.Context) !void {
+        try ctx.swapchain_state.?.recreate(ctx);
+        self.depth_buffer.deinit(g_app_state.device());
+        self.depth_buffer = try DepthBuffer.init(
+            self.backend.vkc.device,
+            .{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) },
+            self.backend.renderer.?.device_local_mem_idx,
+        );
     }
 
     pub fn deinit(self: AppState, gpa: std.mem.Allocator) void {
@@ -103,6 +184,10 @@ pub const AppState = struct {
         defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
         defer self.sync.deinit(self.backend.vkc.device);
         defer gpa.free(self.command_buffers);
+    }
+
+    pub fn device(self: @This()) vk.DeviceProxy {
+        return self.backend.vkc.device;
     }
 };
 pub var g_app_state: AppState = undefined;
@@ -181,7 +266,7 @@ pub const Scene = struct {
             .host_vis_data = host_vis_data,
             .index_buffer = index_buffer,
             .vertex_buffer = vertex_buffer,
-            .pipeline = try createPipeline(dev, layout, g_app_state.render_pass, vk_alloc),
+            .pipeline = try createScenePipeline(dev, layout, g_app_state.render_pass, vk_alloc),
             .pipeline_layout = layout,
             .timer = try std.time.Timer.start(),
         };
@@ -209,7 +294,7 @@ pub const Scene = struct {
             .y = 0,
             .width = framebuffer_size.w,
             .height = framebuffer_size.h,
-            .min_depth = -1,
+            .min_depth = 0,
             .max_depth = 1,
         };
         dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
@@ -263,28 +348,42 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
         .initial_layout = .undefined,
         .final_layout = .present_src_khr,
     };
-
     const color_attachment_refs = [_]vk.AttachmentReference{.{
         .attachment = 0,
         .layout = .color_attachment_optimal,
     }};
 
+    const depth_attachment = vk.AttachmentDescription{
+        .format = DepthBuffer.format,
+        .samples = .{ .@"1_bit" = true },
+        .load_op = .clear,
+        .store_op = .dont_care,
+        .stencil_load_op = .dont_care,
+        .stencil_store_op = .dont_care,
+        .initial_layout = .undefined,
+        .final_layout = .depth_stencil_attachment_optimal,
+    };
+
     const subpasses = [_]vk.SubpassDescription{.{
         .pipeline_bind_point = .graphics,
         .color_attachment_count = color_attachment_refs.len,
         .p_color_attachments = &color_attachment_refs,
+        .p_depth_stencil_attachment = &.{
+            .attachment = 1,
+            .layout = .depth_stencil_attachment_optimal,
+        },
     }};
 
     const dependencies = [_]vk.SubpassDependency{.{
         .src_subpass = vk.SUBPASS_EXTERNAL,
         .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .src_access_mask = .{},
+        .src_stage_mask = .{ .color_attachment_output_bit = true, .late_fragment_tests_bit = true },
+        .src_access_mask = .{ .depth_stencil_attachment_write_bit = true },
         .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
+        .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
     }};
 
-    const attachments = [_]vk.AttachmentDescription{color_attachment};
+    const attachments = [_]vk.AttachmentDescription{ color_attachment, depth_attachment };
     const renderpass_info = vk.RenderPassCreateInfo{
         .attachment_count = attachments.len,
         .p_attachments = &attachments,
@@ -314,6 +413,10 @@ pub fn main() !void {
 
     g_scene = try Scene.init();
     defer g_scene.deinit();
+
+    // hijack the dvui pipeline, so that it accepts depth buffer
+    g_app_state.device().destroyPipeline(g_app_state.backend.renderer.?.pipeline, g_app_state.backend.renderer.?.vk_alloc);
+    g_app_state.backend.renderer.?.pipeline = try createDvuiPipeline(g_app_state.device(), g_app_state.backend.renderer.?.pipeline_layout, g_app_state.render_pass, g_app_state.backend.renderer.?.vk_alloc);
 
     var current_frame_in_flight: u32 = 0;
     main_loop: while (g_app_state.backend.contexts.items.len > 0) {
@@ -365,16 +468,21 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
         std.debug.assert(result == .success);
     }
 
+    const command_buffer = app_state.command_buffers[current_frame_in_flight];
+
+    var framebuffer_recreated = false;
     const image_index = blk: while (true) {
-        if (ctx.swapchain_state.?.framebuffers.len == 0) {
+        if (ctx.swapchain_state.?.framebuffers.len == 0) { // create framebuffer
             ctx.swapchain_state.?.framebuffers = try DvuiVkBackend.createFramebuffers(
                 gpa,
                 b.vkc.device,
                 ctx.swapchain_state.?.swapchain.extent,
                 ctx.swapchain_state.?.swapchain.image_count,
                 ctx.swapchain_state.?.image_views,
+                &[1]vk.ImageView{g_app_state.depth_buffer.view},
                 render_pass,
             );
+            framebuffer_recreated = true;
         }
         const next_image_result = b.vkc.device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
@@ -383,7 +491,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
             .null_handle,
         ) catch |err| {
             if (err == error.OutOfDateKHR) {
-                try ctx.swapchain_state.?.recreate(ctx);
+                try g_app_state.recreateSwapchain(ctx);
                 continue; // need framebuffer
             }
             return err;
@@ -391,7 +499,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
         switch (next_image_result.result) {
             .success => break :blk next_image_result.image_index,
             .suboptimal_khr => {
-                try ctx.swapchain_state.?.recreate(ctx);
+                try g_app_state.recreateSwapchain(ctx);
                 continue; // need framebuffer
             },
             else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
@@ -399,13 +507,14 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
     };
     // slog.debug("paint current frame {} image_index {}", .{ current_frame_in_flight, image_index });
 
-    const command_buffer = app_state.command_buffers[current_frame_in_flight];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
     try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
     const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
+    // if (framebuffer_recreated) g_app_state.depth_buffer.transition(g_app_state.device(), command_buffer);
 
     const clear_values = [_]vk.ClearValue{
         .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
+        .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
     };
     const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
     const render_pass_begin_info = vk.RenderPassBeginInfo{
@@ -421,7 +530,12 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
 
     cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
 
+    cmd.setDepthTestEnable(.true);
+    cmd.setDepthWriteEnable(.true);
     g_scene.draw(command_buffer);
+    cmd.setDepthTestEnable(.false);
+    cmd.setDepthWriteEnable(.false);
+
     if (true) { // draw dvui
         b.renderer.?.beginFrame(cmd.handle, extent);
         // defer _ = b.renderer.?.endFrame();
@@ -464,7 +578,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in
     // slog.debug("frame done", .{});
 }
 
-fn createPipeline(
+fn createScenePipeline(
     dev: vk.DeviceProxy,
     layout: vk.PipelineLayout,
     render_pass: vk.RenderPass,
@@ -481,7 +595,7 @@ fn createPipeline(
         .code_size = fs_spv.len,
         .p_code = @ptrCast(&fs_spv),
     };
-    var pssci = [_]vk.PipelineShaderStageCreateInfo{
+    const pssci = [_]vk.PipelineShaderStageCreateInfo{
         .{
             .stage = .{ .vertex_bit = true },
             .p_name = "main",
@@ -505,6 +619,61 @@ fn createPipeline(
         .p_vertex_attribute_descriptions = &VertexBindings.attribute_description,
     };
 
+    return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
+}
+
+fn createDvuiPipeline(
+    dev: vk.DeviceProxy,
+    layout: vk.PipelineLayout,
+    render_pass: vk.RenderPass,
+    vk_alloc: ?*vk.AllocationCallbacks,
+) vk.DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
+    //  NOTE: VK_KHR_maintenance5 (which was promoted to vulkan 1.4) deprecates ShaderModules.
+    // todo: check for extension and then enable
+    const ext_m5 = false; // VK_KHR_maintenance5
+    const vert_shdd = vk.ShaderModuleCreateInfo{
+        .code_size = DvuiVkBackend.VkRenderer.vs_spv.len,
+        .p_code = @ptrCast(&DvuiVkBackend.VkRenderer.vs_spv),
+    };
+    const frag_shdd = vk.ShaderModuleCreateInfo{
+        .code_size = DvuiVkBackend.VkRenderer.fs_spv.len,
+        .p_code = @ptrCast(&DvuiVkBackend.VkRenderer.fs_spv),
+    };
+    const pssci = [_]vk.PipelineShaderStageCreateInfo{
+        .{
+            .stage = .{ .vertex_bit = true },
+            .p_name = "main",
+            .module = if (ext_m5) null else try dev.createShaderModule(&vert_shdd, vk_alloc),
+            .p_next = if (ext_m5) &vert_shdd else null,
+        },
+        .{
+            .stage = .{ .fragment_bit = true },
+            //.module = frag,
+            .p_name = "main",
+            .module = if (ext_m5) null else try dev.createShaderModule(&frag_shdd, vk_alloc),
+            .p_next = if (ext_m5) &frag_shdd else null,
+        },
+    };
+    defer if (!ext_m5) for (pssci) |p| if (p.module != .null_handle) dev.destroyShaderModule(p.module, vk_alloc);
+
+    const pvisci = vk.PipelineVertexInputStateCreateInfo{
+        .vertex_binding_description_count = DvuiVkBackend.VkRenderer.VertexBindings.binding_description.len,
+        .p_vertex_binding_descriptions = &DvuiVkBackend.VkRenderer.VertexBindings.binding_description,
+        .vertex_attribute_description_count = DvuiVkBackend.VkRenderer.VertexBindings.attribute_description.len,
+        .p_vertex_attribute_descriptions = &DvuiVkBackend.VkRenderer.VertexBindings.attribute_description,
+    };
+
+    return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
+}
+
+fn createPipeline(
+    dev: vk.DeviceProxy,
+    layout: vk.PipelineLayout,
+    render_pass: vk.RenderPass,
+    pssci: []const vk.PipelineShaderStageCreateInfo,
+    pvisci: vk.PipelineVertexInputStateCreateInfo,
+    vk_alloc: ?*vk.AllocationCallbacks,
+) vk.DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
     const piasci = vk.PipelineInputAssemblyStateCreateInfo{
         .topology = .triangle_list,
         .primitive_restart_enable = .false,
@@ -522,14 +691,14 @@ fn createPipeline(
     const prsci = vk.PipelineRasterizationStateCreateInfo{
         .depth_clamp_enable = .false,
         .rasterizer_discard_enable = .false,
-        .polygon_mode = .line,
+        .polygon_mode = .fill,
         .cull_mode = .{ .back_bit = false },
         .front_face = .clockwise,
         .depth_bias_enable = .false,
         .depth_bias_constant_factor = 0,
         .depth_bias_clamp = 0,
         .depth_bias_slope_factor = 0,
-        .line_width = 4,
+        .line_width = 1,
     };
 
     const pmsci = vk.PipelineMultisampleStateCreateInfo{
@@ -560,24 +729,42 @@ fn createPipeline(
         .blend_constants = [_]f32{ 0, 0, 0, 0 },
     };
 
-    const dynstate = [_]vk.DynamicState{ .viewport, .scissor };
+    const dynstate = [_]vk.DynamicState{
+        .viewport,
+        .scissor,
+        .depth_test_enable,
+        .depth_write_enable,
+    };
     const pdsci = vk.PipelineDynamicStateCreateInfo{
         .flags = .{},
         .dynamic_state_count = dynstate.len,
         .p_dynamic_states = &dynstate,
     };
 
+    const sops = std.mem.zeroes(vk.StencilOpState);
+    const ds = vk.PipelineDepthStencilStateCreateInfo{
+        .depth_test_enable = .true,
+        .depth_write_enable = .true,
+        .depth_compare_op = .less,
+        .depth_bounds_test_enable = .false,
+        .stencil_test_enable = .false,
+        .front = sops,
+        .back = sops,
+        .min_depth_bounds = 0.0,
+        .max_depth_bounds = 1.0,
+    };
+
     const gpci = vk.GraphicsPipelineCreateInfo{
         .flags = .{},
-        .stage_count = pssci.len,
-        .p_stages = &pssci,
+        .stage_count = @intCast(pssci.len),
+        .p_stages = pssci.ptr,
         .p_vertex_input_state = &pvisci,
         .p_input_assembly_state = &piasci,
         .p_tessellation_state = null,
         .p_viewport_state = &pvsci,
         .p_rasterization_state = &prsci,
         .p_multisample_state = &pmsci,
-        .p_depth_stencil_state = null,
+        .p_depth_stencil_state = &ds,
         .p_color_blend_state = &pcbsci,
         .p_dynamic_state = &pdsci,
         .layout = layout,
