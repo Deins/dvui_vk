@@ -210,7 +210,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         for (opt.mem_props.memory_types[0..opt.mem_props.memory_type_count], 0..) |mem_type, i|
             if (mem_type.property_flags.device_local_bit and mem_type.property_flags.host_visible_bit) {
                 host_coherent = mem_type.property_flags.host_coherent_bit;
-                slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
+                // slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
                 break :blk @truncate(i);
             };
         // not device local

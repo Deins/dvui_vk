@@ -585,7 +585,7 @@ pub fn main() !void {
             // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
             // TODO: add support for both linear and srgb render targets
             // similar issue: https://github.com/ocornut/imgui/issues/578
-            .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
+            // .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
             .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
         },
         .desired_present_modes = if (!init_opts.vsync) &.{.immediate_khr} else &.{.fifo_khr},
@@ -675,6 +675,7 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *Context, current_frame_i
                 ctx.swapchain_state.?.swapchain.extent,
                 ctx.swapchain_state.?.swapchain.image_count,
                 ctx.swapchain_state.?.image_views,
+                &.{},
                 render_pass,
             );
         }
@@ -840,9 +841,9 @@ pub fn createFramebuffers(
     }
 
     for (0..image_count) |i| {
-        std.debug.assert(shared_attachments.len < 16);
-        var attachments = [1]vk.ImageView{.null_handle} ** 16;
+        var attachments = [1]vk.ImageView{.null_handle} ** 8;
         attachments[0] = image_views[i];
+        std.debug.assert(shared_attachments.len < 7);
         for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
         const framebuffer_info = vk.FramebufferCreateInfo{
             .render_pass = render_pass,
@@ -854,7 +855,7 @@ pub fn createFramebuffers(
         };
 
         const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
-        try framebuffers.append(allocator, framebuffer);
+        framebuffers.appendAssumeCapacity(framebuffer);
     }
 
     return framebuffers.items;
