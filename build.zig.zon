@@ -10,15 +10,6 @@
             .hash = "dvui-0.4.0-dev-AQFJmRHz2QDFAN25xKzwydhJXB0l_TmWZkuofvKmrJkU",
         },
         // dvui dependencies
-        .svg2tvg = .{
-            .url = "git+https://github.com/nat3Github/zig-lib-svg2tvg#78797970be3d676a9087696ec36d6f29a522b580",
-            .hash = "svg2tvg-0.0.0-HpMZuWZ3BgApRrFbd9CxtabLoXEA5odBFUDFrDqno8Ih",
-        },
-        .freetype = .{
-            .url = "git+https://github.com/david-vanderson/freetype#153f45bf550d54c902c2e6233c1c0554f067028c",
-            .hash = "freetype-2.14.1-alzUkTaBqgBs62EIZtayIBpFnCaZmSh8Qy6QNF2BUE3E",
-            .lazy = true,
-        },
 
         .vulkan = .{
             //.path = "deps/vulkan-zig",
@@ -34,6 +25,13 @@
         .win32 = .{
             .url = "git+https://github.com/marlersoft/zigwin32#5587b16fa040573846a6bf531301f6206d31a6bf",
             .hash = "zigwin32-25.0.28-preview-AAAAAICM5AMResOGQnQ85mfe60TTOQeMtt7GRATUOKoP",
+            .lazy = true,
+        },
+
+        // TODO: remove or make truly optional, here to ease debugging
+        .ztracy = .{
+            .url = "git+https://github.com/zig-gamedev/ztracy#e7b401dea9ce006f8b236e3a2ca1a9f3d5c3e896",
+            .hash = "ztracy-0.14.0-dev-zHJSq78GGQC904aYvBPn6OOvRVOq_opAwDfeHZdvQyej",
             .lazy = true,
         },
     },

@@ -15,11 +15,92 @@ pub const AppState = struct {
     render_pass: vk.RenderPass,
     sync: SyncObjects,
     command_buffers: []vk.CommandBuffer,
+
+    pub fn init(gpa: std.mem.Allocator) !AppState {
+        const window_class = win32.L("DvuiWindow");
+        win.RegisterClass(window_class, .{}) catch win32.panicWin32(
+            "RegisterClass",
+            win32.GetLastError(),
+        );
+
+        vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
+        errdefer vk_dll.deinit();
+        const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
+
+        var b = try gpa.create(DvuiVkBackend.VkBackend);
+        b.* = DvuiVkBackend.VkBackend.init(gpa, undefined);
+        errdefer b.deinit();
+
+        // init backend (creates and owns OS window)
+        var window_context: *DvuiVkBackend.Context = try b.allocContext();
+        window_context.* = .{
+            .backend = b,
+            .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
+            .hwnd = undefined,
+        };
+        try win.initWindow(window_context, .{
+            .registered_class = window_class,
+            .dvui_gpa = gpa,
+            .gpa = gpa,
+            .title = "My window",
+        });
+
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context);
+
+        window_context.swapchain_state = try DvuiVkBackend.Context.SwapchainState.init(window_context, .{
+            .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
+            .present_queue_index = b.vkc.physical_device.present_queue_index,
+            .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
+            .desired_formats = &.{
+                // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
+                // TODO: add support for both linear and srgb render targets
+                // similar issue: https://github.com/ocornut/imgui/issues/578
+                .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
+                .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+            },
+            .desired_present_modes = if (!vsync) &.{.immediate_khr} else &.{.fifo_khr},
+        });
+
+        const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
+        errdefer b.vkc.device.destroyRenderPass(render_pass, null);
+
+        const sync = try DvuiVkBackend.SyncObjects.init(b.vkc.device);
+        errdefer sync.deinit(b.vkc.device);
+
+        const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
+        errdefer gpa.free(command_buffers);
+
+        b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
+            .dev = b.vkc.device,
+            .comamnd_pool = b.vkc.cmd_pool,
+            .queue = b.vkc.graphics_queue.handle,
+            .pdev = b.vkc.physical_device.handle,
+            .mem_props = b.vkc.physical_device.memory_properties,
+            .render_pass = render_pass,
+            .max_frames_in_flight = max_frames_in_flight,
+        });
+
+        return .{
+            .backend = b,
+            .command_buffers = command_buffers,
+            .render_pass = render_pass,
+            .sync = sync,
+        };
+    }
+
+    pub fn deinit(self: AppState, gpa: std.mem.Allocator) void {
+        defer vk_dll.deinit();
+        defer gpa.destroy(self.backend);
+        defer self.backend.deinit();
+        defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
+        defer self.sync.deinit(self.backend.vkc.device);
+        defer gpa.free(self.command_buffers);
+    }
 };
 pub var g_app_state: AppState = undefined;
 
-pub const max_frames_in_flight = 3;
-pub const vsync = true;
+pub const max_frames_in_flight = 2;
+pub const vsync = false;
 
 pub fn main() !void {
     dvui.Backend.Common.windowsAttachConsole() catch {};
@@ -29,85 +110,19 @@ pub fn main() !void {
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
-    const window_class = win32.L("DvuiWindow");
-    win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-        "RegisterClass",
-        win32.GetLastError(),
-    );
-
-    vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
-    defer vk_dll.deinit();
-    const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
-
-    var b = DvuiVkBackend.VkBackend.init(gpa, undefined);
-    defer b.deinit();
-
-    // init backend (creates and owns OS window)
-    var window_context: *DvuiVkBackend.Context = try b.allocContext();
-    window_context.* = .{
-        .backend = &b,
-        .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
-        .hwnd = undefined,
-    };
-    try win.initWindow(window_context, .{
-        .registered_class = window_class,
-        .dvui_gpa = gpa,
-        .gpa = gpa,
-        .title = "My window",
-    });
-
-    b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context);
-
-    window_context.swapchain_state = try DvuiVkBackend.Context.SwapchainState.init(window_context, .{
-        .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-        .present_queue_index = b.vkc.physical_device.present_queue_index,
-        .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
-        .desired_formats = &.{
-            // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
-            // TODO: add support for both linear and srgb render targets
-            // similar issue: https://github.com/ocornut/imgui/issues/578
-            .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
-            .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
-        },
-        .desired_present_modes = if (!vsync) &.{.immediate_khr} else &.{.fifo_khr},
-    });
-
-    const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-    defer b.vkc.device.destroyRenderPass(render_pass, null);
-
-    const sync = try DvuiVkBackend.SyncObjects.init(b.vkc.device);
-    defer sync.deinit(b.vkc.device);
-
-    const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
-    defer gpa.free(command_buffers);
-
-    g_app_state = .{
-        .backend = &b,
-        .command_buffers = command_buffers,
-        .render_pass = render_pass,
-        .sync = sync,
-    };
-
-    b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
-        .dev = b.vkc.device,
-        .comamnd_pool = b.vkc.cmd_pool,
-        .queue = b.vkc.graphics_queue.handle,
-        .pdev = b.vkc.physical_device.handle,
-        .mem_props = b.vkc.physical_device.memory_properties,
-        .render_pass = render_pass,
-        .max_frames_in_flight = max_frames_in_flight,
-    });
+    g_app_state = try AppState.init(gpa);
+    defer g_app_state.deinit(gpa);
+    defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
     var current_frame_in_flight: u32 = 0;
-    defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
-    main_loop: while (b.contexts.items.len > 0) {
+    main_loop: while (g_app_state.backend.contexts.items.len > 0) {
         defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
         // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
-                for (b.contexts.items) |ctx| {
+                for (g_app_state.backend.contexts.items) |ctx| {
                     try paint(g_app_state, ctx, current_frame_in_flight);
-                    b.prev_frame_stats = b.renderer.?.stats;
+                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
                         _ = win32.PostMessageA(ctx.hwnd, win32.WM_CLOSE, 0, 0);
                         continue;
@@ -119,7 +134,7 @@ pub fn main() !void {
     }
 }
 
-pub fn drawFrame(ctx: *DvuiVkBackend.Context) void {
+pub fn drawGUI(ctx: *DvuiVkBackend.Context) void {
     {
         // _ = dvui.windowHeader("settings", "", null);
         const m = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .gravity_y = 0 });
@@ -214,7 +229,7 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.Context, current_frame_in_
     // marks the beginning of a frame for dvui, can call dvui functions after thisz
     try ctx.dvui_window.begin(nstime);
 
-    drawFrame(ctx);
+    drawGUI(ctx);
 
     // marks end of dvui frame, don't call dvui functions after this
     // - sends all dvui stuff to backend for rendering, must be called before renderPresent()

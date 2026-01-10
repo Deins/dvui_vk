@@ -6,6 +6,7 @@ const slog = std.log.scoped(.dvu_vk_backend);
 comptime {
     _ = @import("dvui_c.zig");
 }
+const zt = @import("ztracy"); // TODO: remove, just for temp debugging
 
 pub const max_frames_in_flight = 3;
 
@@ -63,6 +64,13 @@ pub const Context = struct {
         images: []vk.Image,
         image_views: []vk.ImageView,
         framebuffers: []vk.Framebuffer = &.{},
+        // options for recreate, cached from init or modified before manually recreating swapchain
+        options: Options,
+
+        const Options = struct {
+            desired_formats: []const vk.SurfaceFormatKHR = &.{},
+            desired_present_modes: []vk.PresentModeKHR = &.{},
+        };
 
         pub fn init(ctx: *Context, options: vkk.Swapchain.CreateOptions) !SwapchainState {
             const gpa = ctx.backend.gpa;
@@ -86,6 +94,10 @@ pub const Context = struct {
                 .swapchain = swapchain,
                 .images = images,
                 .image_views = image_views,
+                .options = .{
+                    .desired_formats = try gpa.dupe(vk.SurfaceFormatKHR, options.desired_formats),
+                    .desired_present_modes = try gpa.dupe(vk.PresentModeKHR, options.desired_present_modes),
+                },
             };
         }
 
@@ -100,9 +112,15 @@ pub const Context = struct {
             self.image_views = &.{};
             gpa.free(self.images);
             self.images = &.{};
+
+            gpa.free(self.options.desired_present_modes);
+            gpa.free(self.options.desired_formats);
         }
 
         pub fn recreate(self: *@This(), ctx: *Context) !void {
+            const tracy_zone = zt.ZoneN(@src(), "recreate swapchain");
+            defer tracy_zone.End();
+
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
             try vkc.device.deviceWaitIdle();
@@ -123,7 +141,8 @@ pub const Context = struct {
                     .desired_extent = extent,
                     .old_swapchain = old_swapchain.handle,
                     .desired_min_image_count = old_swapchain.image_count,
-                    .desired_formats = &.{.{ .format = old_swapchain.image_format, .color_space = old_swapchain.color_space }},
+                    .desired_formats = self.options.desired_formats,
+                    .desired_present_modes = self.options.desired_present_modes,
                 },
                 null,
             );
@@ -132,7 +151,10 @@ pub const Context = struct {
             ctx.last_pixel_size.h = @floatFromInt(new_swapchain.extent.height);
             vkc.device.destroySwapchainKHR(old_swapchain.handle, vkc.alloc);
 
+            const options = self.options;
+            self.options = .{};
             self.deinit(ctx);
+            self.options = options;
             self.images = try gpa.alloc(vk.Image, self.swapchain.image_count);
             self.swapchain = new_swapchain;
             try self.swapchain.getImages(self.images);
@@ -317,6 +339,7 @@ pub const VkContext = struct {
         const present_queue = vk.QueueProxy.init(present_queue_handle, device.wrapper);
 
         const cmd_pool = try device.createCommandPool(&.{
+            .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = graphics_queue_index,
         }, null);
         errdefer device.destroyCommandPool(cmd_pool, null);
@@ -609,7 +632,7 @@ pub fn main() !void {
                 for (b.contexts.items, 0..) |ctx, ctx_i| {
                     _ = ctx_i; // autofix
                     // slog.info("frame {} ctx {}", .{ current_frame_in_flight, ctx_i });
-                    try paint(app, g_app_state, ctx, current_frame_in_flight);
+                    try paint(app, &g_app_state, ctx, current_frame_in_flight);
                     b.prev_frame_stats = b.renderer.?.stats;
                     if (ctx.received_close) {
                         _ = win32.PostMessageA(ctx.hwnd, win32.WM_CLOSE, 0, 0);
@@ -622,21 +645,29 @@ pub fn main() !void {
     }
 }
 
-pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in_flight: usize) !void {
+pub fn paint(app: dvui.App, app_state: *AppState, ctx: *Context, current_frame_in_flight: usize) !void {
+    const pzne = zt.ZoneN(@src(), "paint");
+    defer pzne.End();
+
     const b = ctx.backend;
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
-    const sync = app_state.sync;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
     { // check/wait for previous frame to finish
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
+        const zwt = zt.ZoneN(@src(), "wait");
+        defer zwt.End();
+        const result = try b.vkc.device.waitForFences(1, @ptrCast(&app_state.sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
         std.debug.assert(result == .success);
     }
 
     const image_index = blk: while (true) {
+        const zimgi = zt.ZoneN(@src(), "image index");
+        defer zimgi.End();
         if (ctx.swapchain_state.?.framebuffers.len == 0) {
+            const zz = zt.ZoneN(@src(), "recreate framebuffer");
+            defer zz.End();
             ctx.swapchain_state.?.framebuffers = try createFramebuffers(
                 gpa,
                 b.vkc.device,
@@ -646,22 +677,32 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
                 render_pass,
             );
         }
+        const zack = zt.ZoneN(@src(), "acquireNextImageKHR");
         const next_image_result = b.vkc.device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
-            std.math.maxInt(u64),
-            sync.image_available_semaphores[current_frame_in_flight],
+            std.time.ns_per_ms * 100,
+            app_state.sync.image_available_semaphores[current_frame_in_flight],
             .null_handle,
         ) catch |err| {
+            const zzz = zt.ZoneN(@src(), "error");
+            defer zzz.End();
             if (err == error.OutOfDateKHR) {
+                const zz = zt.ZoneN(@src(), "OutOfDate");
+                defer zz.End();
                 try ctx.swapchain_state.?.recreate(ctx);
+                try app_state.sync.resetImageAvailable(b.vkc.device);
                 continue; // need framebuffer
             }
             return err;
         };
+        zack.End();
         switch (next_image_result.result) {
             .success => {},
             .suboptimal_khr => {
+                const zz = zt.ZoneN(@src(), "suboptimal");
+                defer zz.End();
                 try ctx.swapchain_state.?.recreate(ctx);
+                try app_state.sync.resetImageAvailable(b.vkc.device);
                 continue; // need framebuffer
             },
             else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
@@ -671,6 +712,7 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
 
     const command_buffer = app_state.command_buffers[current_frame_in_flight];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
+    const zrp = zt.ZoneN(@src(), "redner-pass");
     try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
     const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
 
@@ -698,11 +740,13 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
     const nstime = ctx.dvui_window.beginWait(hasEvent());
 
     // marks the beginning of a frame for dvui, can call dvui functions after thisz
+    const zdvui = zt.ZoneN(@src(), "dvui");
     try ctx.dvui_window.begin(nstime);
     const res = try app.frameFn();
     // marks end of dvui frame, don't call dvui functions after this
     // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
     _ = try ctx.dvui_window.end(.{});
+    zdvui.End();
 
     if (res != .ok) ctx.received_close = true;
 
@@ -711,13 +755,15 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
     // b.setCursor(win.cursorRequested());
 
     const frame_sync_objects = FrameSyncObjects{
-        .image_available_semaphore = sync.image_available_semaphores[current_frame_in_flight],
-        .render_finished_semaphore = sync.render_finished_semaphores[current_frame_in_flight],
-        .in_flight_fence = sync.in_flight_fences[current_frame_in_flight],
+        .image_available_semaphore = app_state.sync.image_available_semaphores[current_frame_in_flight],
+        .render_finished_semaphore = app_state.sync.render_finished_semaphores[current_frame_in_flight],
+        .in_flight_fence = app_state.sync.in_flight_fences[current_frame_in_flight],
     };
     cmd.endRenderPass();
+    zrp.End();
     cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
 
+    const zpresent = zt.ZoneN(@src(), "present");
     if (!try present(
         ctx,
         app_state.command_buffers[current_frame_in_flight],
@@ -727,6 +773,7 @@ pub fn paint(app: dvui.App, app_state: AppState, ctx: *Context, current_frame_in
     )) {
         // should_recreate_swapchain = true;
     }
+    zpresent.End();
 }
 
 pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.RenderPass {
@@ -854,6 +901,14 @@ pub const SyncObjects = struct {
         };
     }
 
+    pub fn resetImageAvailable(sync: *SyncObjects, device: vk.DeviceProxy) !void {
+        const semaphore_info = vk.SemaphoreCreateInfo{};
+        for (0..max_frames_in_flight) |i| {
+            device.destroySemaphore(sync.image_available_semaphores[i], null);
+            sync.image_available_semaphores[i] = try device.createSemaphore(&semaphore_info, null);
+        }
+    }
+
     pub fn deinit(sync: SyncObjects, device: vk.DeviceProxy) void {
         for (sync.image_available_semaphores) |semaphore| {
             device.destroySemaphore(semaphore, null);
@@ -866,14 +921,6 @@ pub const SyncObjects = struct {
         }
     }
 };
-
-pub fn createCommandPool(device: vk.DeviceProxy, queue_family_index: u32) !vk.CommandPool {
-    const create_info = vk.CommandPoolCreateInfo{
-        .flags = .{ .reset_command_buffer_bit = true },
-        .queue_family_index = queue_family_index,
-    };
-    return device.createCommandPool(&create_info, null);
-}
 
 pub fn createCommandBuffers(
     allocator: std.mem.Allocator,
@@ -1204,14 +1251,14 @@ pub const win = if (is_windows) struct {
                     const psize = win.pixelSize(hwnd);
                     ctx.last_pixel_size = .{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
                     ctx.last_window_size = win.windowSize(hwnd, psize);
-                    if (ctx.swapchain_state != null) {
-                        if (dvui.App.get()) |app| {
-                            paint(app, g_app_state, ctx, 0) catch |err| {
-                                ctx.received_close = true;
-                                slog.warn("paint error during resize: {}", .{err});
-                            };
-                        }
-                    }
+                    // if (ctx.swapchain_state != null) {
+                    //     if (dvui.App.get()) |app| {
+                    //         paint(app, &g_app_state, ctx, 0) catch |err| {
+                    //             ctx.received_close = true;
+                    //             slog.warn("paint error during resize: {}", .{err});
+                    //         };
+                    //     }
+                    // }
                 }
                 // if (contextFromHwnd(hwnd)) |ctx| {
                 //     slog.info("WM_SIZE", .{});
