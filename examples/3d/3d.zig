@@ -115,7 +115,12 @@ pub const AppState = struct {
             .title = "3d example",
         });
 
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32);
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{
+            .version = vk.API_VERSION_1_2,
+            .required_extensions = &.{
+                vk.extensions.ext_extended_dynamic_state.name, // for dynamic depth on/off
+            },
+        });
 
         window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
@@ -400,7 +405,7 @@ pub const max_frames_in_flight = 3;
 pub const vsync = false;
 
 pub fn main() !void {
-    dvui.Backend.Common.windowsAttachConsole() catch {};
+    if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
     dvui.Examples.show_demo_window = false;
 
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
@@ -529,11 +534,11 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
 
     cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
 
-    cmd.setDepthTestEnable(.true);
-    cmd.setDepthWriteEnable(.true);
+    cmd.setDepthTestEnableEXT(.true);
+    cmd.setDepthWriteEnableEXT(.true);
     g_scene.draw(command_buffer);
-    cmd.setDepthTestEnable(.false);
-    cmd.setDepthWriteEnable(.false);
+    cmd.setDepthTestEnableEXT(.false);
+    cmd.setDepthWriteEnableEXT(.false);
 
     if (true) { // draw dvui
         b.renderer.?.beginFrame(cmd.handle, extent);

@@ -41,9 +41,6 @@ pub const GenericError = dvui.Backend.GenericError;
 pub const TextureError = dvui.Backend.TextureError;
 
 const is_windows = @import("builtin").target.os.tag == .windows;
-// pub const dvui_win = if (is_windows) @import("dvui_win") else void;
-// pub const win32 = if (is_windows) dvui_win.win32 else void;
-pub const win32 = @import("win32").everything;
 
 pub fn dvuiBackend(context: *WindowContext) dvui.Backend {
     return dvui.Backend.init(@ptrCast(@alignCast(context)));
@@ -241,7 +238,7 @@ pub fn getInstanceProcAddress(instance: vk.Instance, procname: [*:0]const u8) vk
 }
 
 pub fn main() !void {
-    dvui.Backend.Common.windowsAttachConsole() catch {};
+    if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
 
     const app = dvui.App.get() orelse return error.DvuiAppNotDefined;
 
@@ -272,19 +269,25 @@ pub fn main() !void {
         .hwnd = undefined,
     };
     window_context.dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}); // this uses context, thats why called separately from constructor
-    try initWindow(window_context, .{
+    initWindow(window_context, .{
         .dvui_gpa = gpa,
         .gpa = gpa,
         .size = init_opts.size,
         .title = init_opts.title,
         .icon = init_opts.icon,
-    });
+    }) catch |err| {
+        slog.err("initWindow failed: {}", .{err});
+        return err;
+    };
     const window = window_context.glfw_win;
     defer glfw.destroyWindow(window);
     // TODO: this sucks, because to select vk.device we need window, it creates this nasty circular partial initialization nastiness.
-    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceGLFW);
+    b.vkc = VkContext.init(gpa, loader, window_context, &createVkSurfaceGLFW, .{}) catch |err| {
+        slog.err("VkContext.init failed: {}", .{err});
+        return err;
+    };
 
-    window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
+    window_context.swapchain_state = WindowContext.SwapchainState.init(window_context, .{
         .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
         .present_queue_index = b.vkc.physical_device.present_queue_index,
         .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
@@ -296,7 +299,10 @@ pub fn main() !void {
             .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
         },
         .desired_present_modes = if (!init_opts.vsync) &.{.immediate_khr} else &.{.fifo_khr},
-    });
+    }) catch |err| {
+        slog.err("SwapchainState.init failed: {}", .{err});
+        return err;
+    };
 
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
     defer b.vkc.device.destroyRenderPass(render_pass, null);
@@ -339,14 +345,11 @@ pub fn main() !void {
             glfw.setWindowShouldClose(window, true);
         }
 
+        // TODO: fixme: implement actual multi-window implementation, this won't work right
         for (b.contexts.items, 0..) |ctx, ctx_i| {
             _ = ctx_i; // autofix
             try paint(app, &g_app_state, ctx);
             b.prev_frame_stats = b.renderer.?.stats;
-            if (ctx.received_close) {
-                _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
-                continue;
-            }
         }
 
         glfw.pollEvents();

@@ -85,10 +85,8 @@ pub fn build(b: *Build) !void {
     });
 
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = if (glfw_on) b.path("src/dvui_vk_glfw.zig") else b.path("src/dvui_vk_win32.zig") });
-    if (glfw_on) {
-        dvui_vk_backend.addImport("glfw", glfw.?.module("glfw"));
-        dvui_vk_backend.linkLibrary(glfw_build.?.artifact("glfw"));
-    }
+    if (glfw_build) |gb| dvui_vk_backend.linkLibrary(gb.artifact("glfw"));
+    if (glfw) |g| dvui_vk_backend.addImport("glfw", g.module("glfw"));
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
@@ -100,7 +98,7 @@ pub fn build(b: *Build) !void {
         }
         // dvui_win.addImport("dvui", dvui_module);
         // dvui_vk_backend.addImport("dvui_win", dvui_win);
-    } else @panic("TODO");
+    }
     if (ztracy) |zt| {
         dvui_vk_backend.addImport("ztracy", zt.module("root"));
         dvui_vk_backend.linkLibrary(zt.artifact("tracy"));

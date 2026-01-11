@@ -237,7 +237,7 @@ pub var g_app_state: AppState = undefined;
 pub const paint = dvui_vk_common.paint;
 
 pub fn main() !void {
-    dvui.Backend.Common.windowsAttachConsole() catch {};
+    if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
 
     const app = dvui.App.get() orelse return error.DvuiAppNotDefined;
 
@@ -276,7 +276,7 @@ pub fn main() !void {
         .icon = init_opts.icon,
     });
 
-    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32);
+    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{});
 
     window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
         .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,

@@ -23,16 +23,24 @@ pub const VkContext = struct {
         alloc.destroy(self.device.wrapper);
     }
 
+    pub const Options = struct {
+        version: vk.Version = vk.API_VERSION_1_2,
+        /// Array of required physical device extensions to enable.
+        /// Note: VK_KHR_swapchain and VK_KHR_subset (if available) are automatically enabled.
+        required_extensions: []const [*:0]const u8 = &.{},
+    };
+
     pub fn init(
         allocator: std.mem.Allocator,
         loader: anytype,
         window_context: *WindowContext,
         createSurface: CreateSurfaceCallback,
+        opt: Options,
     ) !VkContext {
         const instance = try vkk.instance.create(
             allocator,
             loader,
-            .{ .required_api_version = @bitCast(vk.API_VERSION_1_3) },
+            .{ .required_api_version = opt.version },
             null,
         );
         errdefer instance.destroyInstance(null);
@@ -44,15 +52,9 @@ pub const VkContext = struct {
 
         const physical_device = try vkk.PhysicalDevice.select(allocator, instance, .{
             .surface = window_context.surface,
-            .transfer_queue = .dedicated,
-            .required_api_version = @bitCast(vk.API_VERSION_1_2),
-            .required_extensions = &.{
-                // vk.extensions.khr_ray_tracing_pipeline.name,
-                // vk.extensions.khr_acceleration_structure.name,
-                // vk.extensions.khr_deferred_host_operations.name,
-                // vk.extensions.khr_buffer_device_address.name,
-                // vk.extensions.ext_descriptor_indexing.name,
-            },
+            .transfer_queue = .none,
+            .required_api_version = opt.version,
+            .required_extensions = opt.required_extensions,
             .required_features = .{
                 .sampler_anisotropy = .true,
             },

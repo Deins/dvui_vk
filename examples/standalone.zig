@@ -45,7 +45,7 @@ pub const AppState = struct {
             .title = "My window",
         });
 
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32);
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{});
 
         window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
@@ -103,7 +103,7 @@ pub const max_frames_in_flight = 2;
 pub const vsync = false;
 
 pub fn main() !void {
-    dvui.Backend.Common.windowsAttachConsole() catch {};
+    if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
     dvui.Examples.show_demo_window = true;
 
     var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
