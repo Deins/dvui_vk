@@ -151,6 +151,7 @@ pub const WindowContext = struct {
     swapchain_state: ?SwapchainState = null,
 
     hwnd: if (builtin.os.tag != .windows) void else *anyopaque, // win32.HWND
+    glfw_win: ?*c_long = null,
 
     pub const SwapchainState = struct {
         swapchain: vkk.Swapchain,
@@ -551,4 +552,117 @@ pub fn present(
     }
 
     return true;
+}
+
+pub const AppState = struct {
+    backend: *VkBackend,
+    render_pass: vk.RenderPass,
+    sync: FrameSync,
+    command_buffers: []vk.CommandBuffer,
+};
+
+pub fn hasEvent() bool {
+    return false; // TODO: implement
+}
+
+pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
+    const b = ctx.backend;
+    const gpa = b.gpa;
+    const render_pass = app_state.render_pass;
+    const device = b.vkc.device;
+
+    if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
+
+    // wait for previous frame to finish
+    try app_state.sync.begin(device);
+    defer app_state.sync.end();
+
+    const image_index = blk: while (true) {
+        if (ctx.swapchain_state.?.framebuffers.len == 0) {
+            ctx.swapchain_state.?.framebuffers = try createFramebuffers(
+                gpa,
+                device,
+                ctx.swapchain_state.?.swapchain.extent,
+                ctx.swapchain_state.?.swapchain.image_count,
+                ctx.swapchain_state.?.image_views,
+                &.{},
+                render_pass,
+            );
+        }
+        const next_image_result = device.acquireNextImageKHR(
+            ctx.swapchain_state.?.swapchain.handle,
+            std.time.ns_per_ms * 100,
+            app_state.sync.imageAvailableSemaphore(),
+            .null_handle,
+        ) catch |err| {
+            if (err == error.OutOfDateKHR) {
+                try ctx.swapchain_state.?.recreate(ctx);
+                continue; // need framebuffer
+            }
+            return err;
+        };
+        switch (next_image_result.result) {
+            .success => {},
+            .suboptimal_khr => {
+                try ctx.swapchain_state.?.recreate(ctx);
+                continue; // need framebuffer
+            },
+            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
+        }
+        break :blk next_image_result.image_index;
+    };
+
+    const command_buffer = app_state.command_buffers[app_state.sync.current_frame];
+    const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
+    try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
+    const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
+
+    const clear_values = [_]vk.ClearValue{
+        .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
+    };
+    const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
+    const render_pass_begin_info = vk.RenderPassBeginInfo{
+        .render_pass = render_pass,
+        .framebuffer = framebuffer,
+        .render_area = .{
+            .offset = .{ .x = 0, .y = 0 },
+            .extent = extent,
+        },
+        .clear_value_count = clear_values.len,
+        .p_clear_values = &clear_values,
+    };
+
+    cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
+
+    b.renderer.?.beginFrame(cmd.handle, extent);
+    // defer _ = b.renderer.?.endFrame();
+
+    // beginWait coordinates with waitTime below to run frames only when needed
+    const nstime = ctx.dvui_window.beginWait(hasEvent());
+
+    // marks the beginning of a frame for dvui, can call dvui functions after thisz
+    try ctx.dvui_window.begin(nstime);
+    const res = try app.frameFn();
+    // marks end of dvui frame, don't call dvui functions after this
+    // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
+    _ = try ctx.dvui_window.end(.{});
+
+    if (res != .ok) ctx.received_close = true;
+
+    // cursor management
+    // TODO: reenable
+    // b.setCursor(win.cursorRequested());
+
+    cmd.endRenderPass();
+    cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
+
+    if (!try present(
+        ctx,
+        app_state.command_buffers[app_state.sync.current_frame],
+        app_state.sync.items[app_state.sync.current_frame],
+        ctx.swapchain_state.?.swapchain.handle,
+        image_index,
+    )) {
+        // should_recreate_swapchain = true;
+    }
 }

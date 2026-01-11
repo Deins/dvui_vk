@@ -14,8 +14,7 @@ Backend is separated in two main parts:
 ### Current platform support
 Renderer alone should be cross-platform. Full 'batteries included' integration:
 * ✔️ Windows
-* ❌ Linux X11
-* ❌ Linux Wayland 
+* Linux - work in progress, using GLFW library. Use flag `-Dglfw` for app example.
 
 ### todo - not yet implemented 🚧
 * Rendering:

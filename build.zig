@@ -84,7 +84,11 @@ pub fn build(b: *Build) !void {
         .flags = &.{ "-DINCLUDE_CUSTOM_LIBC_FUNCS=1", "-DSTBI_NO_STDLIB=1", "-DSTBIW_NO_STDLIB=1" },
     });
 
-    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = b.path("src/dvui_vk_win32.zig") });
+    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = if (glfw_on) b.path("src/dvui_vk_glfw.zig") else b.path("src/dvui_vk_win32.zig") });
+    if (glfw_on) {
+        dvui_vk_backend.addImport("glfw", glfw.?.module("glfw"));
+        dvui_vk_backend.linkLibrary(glfw_build.?.artifact("glfw"));
+    }
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
@@ -140,36 +144,6 @@ pub fn build(b: *Build) !void {
     }
     b.installArtifact(exe_standalone);
     b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
-
-    const exe_glfw = blk: {
-        if (glfw == null) break :blk null;
-        const exe_glfw_mod = b.addModule("glfw", .{
-            .root_source_file = b.path("examples/glfw.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "vulkan", .module = vkzig_bindings },
-                .{ .name = "glfw", .module = glfw.?.module("glfw") },
-                .{ .name = "dvui", .module = dvui_module },
-                .{ .name = "vulkan", .module = vkzig_bindings },
-            },
-        });
-
-        const exe_glfw = b.addExecutable(.{
-            .name = "glfw",
-            .root_module = exe_glfw_mod,
-        });
-        // exe_glfw.root_module.addImport("dvui", dvui_module);
-        if (target.result.os.tag == .windows) {
-            exe_glfw.win32_manifest = dvui_dep.path("./src/main.manifest");
-            exe_glfw.subsystem = .Windows;
-        }
-        exe_glfw.linkLibrary(glfw_build.?.artifact("glfw"));
-        b.installArtifact(exe_glfw);
-        b.step("run-glfw", "Run demo").dependOn(&b.addRunArtifact(exe_glfw).step);
-        break :blk exe_glfw;
-    };
-    _ = exe_glfw; // autofix
 
     { // Shaders
         const glslc = b.option(bool, "glslc", "Compile glsl shaders") orelse false;
