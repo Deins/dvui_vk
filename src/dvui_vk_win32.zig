@@ -6,11 +6,8 @@ const slog = std.log.scoped(.dvu_vk_backend);
 comptime {
     _ = @import("dvui_c.zig");
 }
-const zt = @import("ztracy"); // TODO: remove, just for temp debugging
 
 pub const VkRenderer = @import("dvui_vk_renderer.zig");
-
-pub const max_frames_in_flight = 3;
 
 pub const InitOptions = struct {
     /// [windows os only] A windows class that has previously been registered via RegisterClass.
@@ -34,6 +31,13 @@ pub const dvui_vk_common = @import("dvui_vk_common.zig");
 pub const VkContext = dvui_vk_common.VkContext;
 pub const VkBackend = dvui_vk_common.VkBackend;
 pub const WindowContext = dvui_vk_common.WindowContext;
+pub const createRenderPass = dvui_vk_common.createRenderPass;
+pub const createFramebuffers = dvui_vk_common.createFramebuffers;
+pub const destroyFramebuffers = dvui_vk_common.destroyFramebuffers;
+pub const FrameSync = dvui_vk_common.FrameSync;
+pub const createCommandBuffers = dvui_vk_common.createCommandBuffers;
+pub const present = dvui_vk_common.present;
+pub const max_frames_in_flight = 3;
 
 pub const GenericError = dvui.Backend.GenericError;
 pub const TextureError = dvui.Backend.TextureError;
@@ -235,7 +239,7 @@ pub fn hasEvent() bool {
 pub const AppState = struct {
     backend: *VkBackend,
     render_pass: vk.RenderPass,
-    sync: SyncObjects,
+    sync: FrameSync,
     command_buffers: []vk.CommandBuffer,
 };
 pub var g_app_state: AppState = undefined;
@@ -299,8 +303,8 @@ pub fn main() !void {
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
     defer b.vkc.device.destroyRenderPass(render_pass, null);
 
-    const sync = try SyncObjects.init(b.vkc.device);
-    defer sync.deinit(b.vkc.device);
+    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+    defer sync.deinit(gpa, b.vkc.device);
 
     const command_buffers = try createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
     defer gpa.free(command_buffers);
@@ -329,16 +333,13 @@ pub fn main() !void {
         .max_frames_in_flight = max_frames_in_flight,
     });
 
-    var current_frame_in_flight: u32 = 0;
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
     main_loop: while (b.contexts.items.len > 0) {
-        defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
                 for (b.contexts.items, 0..) |ctx, ctx_i| {
                     _ = ctx_i; // autofix
-                    // slog.info("frame {} ctx {}", .{ current_frame_in_flight, ctx_i });
-                    try paint(app, &g_app_state, ctx, current_frame_in_flight);
+                    try paint(app, &g_app_state, ctx);
                     b.prev_frame_stats = b.renderer.?.stats;
                     if (ctx.received_close) {
                         _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
@@ -351,32 +352,23 @@ pub fn main() !void {
     }
 }
 
-pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext, current_frame_in_flight: usize) !void {
-    const pzne = zt.ZoneN(@src(), "paint");
-    defer pzne.End();
-
+pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     const b = ctx.backend;
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
+    const device = b.vkc.device;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    { // check/wait for previous frame to finish
-        const zwt = zt.ZoneN(@src(), "wait");
-        defer zwt.End();
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&app_state.sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
-        std.debug.assert(result == .success);
-    }
+    // wait for previous frame to finish
+    try app_state.sync.begin(device);
+    defer app_state.sync.end();
 
     const image_index = blk: while (true) {
-        const zimgi = zt.ZoneN(@src(), "image index");
-        defer zimgi.End();
         if (ctx.swapchain_state.?.framebuffers.len == 0) {
-            const zz = zt.ZoneN(@src(), "recreate framebuffer");
-            defer zz.End();
             ctx.swapchain_state.?.framebuffers = try createFramebuffers(
                 gpa,
-                b.vkc.device,
+                device,
                 ctx.swapchain_state.?.swapchain.extent,
                 ctx.swapchain_state.?.swapchain.image_count,
                 ctx.swapchain_state.?.image_views,
@@ -384,32 +376,22 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext, current_f
                 render_pass,
             );
         }
-        const zack = zt.ZoneN(@src(), "acquireNextImageKHR");
-        const next_image_result = b.vkc.device.acquireNextImageKHR(
+        const next_image_result = device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
             std.time.ns_per_ms * 100,
-            app_state.sync.image_available_semaphores[current_frame_in_flight],
+            app_state.sync.imageAvailableSemaphore(),
             .null_handle,
         ) catch |err| {
-            const zzz = zt.ZoneN(@src(), "error");
-            defer zzz.End();
             if (err == error.OutOfDateKHR) {
-                const zz = zt.ZoneN(@src(), "OutOfDate");
-                defer zz.End();
                 try ctx.swapchain_state.?.recreate(ctx);
-                try app_state.sync.resetImageAvailable(b.vkc.device);
                 continue; // need framebuffer
             }
             return err;
         };
-        zack.End();
         switch (next_image_result.result) {
             .success => {},
             .suboptimal_khr => {
-                const zz = zt.ZoneN(@src(), "suboptimal");
-                defer zz.End();
                 try ctx.swapchain_state.?.recreate(ctx);
-                try app_state.sync.resetImageAvailable(b.vkc.device);
                 continue; // need framebuffer
             },
             else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
@@ -417,11 +399,10 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext, current_f
         break :blk next_image_result.image_index;
     };
 
-    const command_buffer = app_state.command_buffers[current_frame_in_flight];
+    const command_buffer = app_state.command_buffers[app_state.sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
-    const zrp = zt.ZoneN(@src(), "redner-pass");
-    try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
-    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
+    try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
+    const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
 
     const clear_values = [_]vk.ClearValue{
         .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
@@ -447,13 +428,11 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext, current_f
     const nstime = ctx.dvui_window.beginWait(hasEvent());
 
     // marks the beginning of a frame for dvui, can call dvui functions after thisz
-    const zdvui = zt.ZoneN(@src(), "dvui");
     try ctx.dvui_window.begin(nstime);
     const res = try app.frameFn();
     // marks end of dvui frame, don't call dvui functions after this
     // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
     _ = try ctx.dvui_window.end(.{});
-    zdvui.End();
 
     if (res != .ok) ctx.received_close = true;
 
@@ -461,253 +440,18 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext, current_f
     // TODO: reenable
     // b.setCursor(win.cursorRequested());
 
-    const frame_sync_objects = FrameSyncObjects{
-        .image_available_semaphore = app_state.sync.image_available_semaphores[current_frame_in_flight],
-        .render_finished_semaphore = app_state.sync.render_finished_semaphores[current_frame_in_flight],
-        .in_flight_fence = app_state.sync.in_flight_fences[current_frame_in_flight],
-    };
     cmd.endRenderPass();
-    zrp.End();
     cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
 
-    const zpresent = zt.ZoneN(@src(), "present");
     if (!try present(
         ctx,
-        app_state.command_buffers[current_frame_in_flight],
-        frame_sync_objects,
+        app_state.command_buffers[app_state.sync.current_frame],
+        app_state.sync.items[app_state.sync.current_frame],
         ctx.swapchain_state.?.swapchain.handle,
         image_index,
     )) {
         // should_recreate_swapchain = true;
     }
-    zpresent.End();
-}
-
-pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.RenderPass {
-    const color_attachment = vk.AttachmentDescription{
-        .format = image_format,
-        .samples = .{ .@"1_bit" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .undefined,
-        .final_layout = .present_src_khr,
-    };
-
-    const color_attachment_refs = [_]vk.AttachmentReference{.{
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    }};
-
-    const subpasses = [_]vk.SubpassDescription{.{
-        .pipeline_bind_point = .graphics,
-        .color_attachment_count = color_attachment_refs.len,
-        .p_color_attachments = &color_attachment_refs,
-    }};
-
-    const dependencies = [_]vk.SubpassDependency{.{
-        .src_subpass = vk.SUBPASS_EXTERNAL,
-        .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .src_access_mask = .{},
-        .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    }};
-
-    const attachments = [_]vk.AttachmentDescription{color_attachment};
-    const renderpass_info = vk.RenderPassCreateInfo{
-        .attachment_count = attachments.len,
-        .p_attachments = &attachments,
-        .subpass_count = subpasses.len,
-        .p_subpasses = &subpasses,
-        .dependency_count = dependencies.len,
-        .p_dependencies = &dependencies,
-    };
-
-    return device.createRenderPass(&renderpass_info, null);
-}
-
-pub fn createFramebuffers(
-    allocator: std.mem.Allocator,
-    device: vk.DeviceProxy,
-    extent: vk.Extent2D,
-    image_count: u32,
-    image_views: []const vk.ImageView,
-    shared_attachments: []const vk.ImageView,
-    render_pass: vk.RenderPass,
-) ![]vk.Framebuffer {
-    var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
-    errdefer {
-        for (framebuffers.items) |framebuffer| {
-            device.destroyFramebuffer(framebuffer, null);
-        }
-        framebuffers.deinit(allocator);
-    }
-
-    for (0..image_count) |i| {
-        var attachments = [1]vk.ImageView{.null_handle} ** 8;
-        attachments[0] = image_views[i];
-        std.debug.assert(shared_attachments.len < 7);
-        for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
-        const framebuffer_info = vk.FramebufferCreateInfo{
-            .render_pass = render_pass,
-            .attachment_count = @intCast(1 + shared_attachments.len),
-            .p_attachments = &attachments,
-            .width = extent.width,
-            .height = extent.height,
-            .layers = 1,
-        };
-
-        const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
-        framebuffers.appendAssumeCapacity(framebuffer);
-    }
-
-    return framebuffers.items;
-}
-
-pub fn destroyFramebuffers(allocator: std.mem.Allocator, device: vk.DeviceProxy, framebuffers: []const vk.Framebuffer) void {
-    for (framebuffers) |framebuffer| {
-        device.destroyFramebuffer(framebuffer, null);
-    }
-    allocator.free(framebuffers);
-}
-
-pub const SyncObjects = struct {
-    image_available_semaphores: [max_frames_in_flight]vk.Semaphore,
-    render_finished_semaphores: [max_frames_in_flight]vk.Semaphore,
-    in_flight_fences: [max_frames_in_flight]vk.Fence,
-
-    pub fn init(device: vk.DeviceProxy) !SyncObjects {
-        var image_available_semaphores = [_]vk.Semaphore{.null_handle} ** max_frames_in_flight;
-        var render_finished_semaphores = [_]vk.Semaphore{.null_handle} ** max_frames_in_flight;
-        var in_flight_fences = [_]vk.Fence{.null_handle} ** max_frames_in_flight;
-        errdefer {
-            for (image_available_semaphores) |semaphore| {
-                if (semaphore == .null_handle) continue;
-                device.destroySemaphore(semaphore, null);
-            }
-            for (render_finished_semaphores) |semaphore| {
-                if (semaphore == .null_handle) continue;
-                device.destroySemaphore(semaphore, null);
-            }
-            for (in_flight_fences) |fence| {
-                if (fence == .null_handle) continue;
-                device.destroyFence(fence, null);
-            }
-        }
-
-        const semaphore_info = vk.SemaphoreCreateInfo{};
-        const fence_info = vk.FenceCreateInfo{ .flags = .{ .signaled_bit = true } };
-        for (0..max_frames_in_flight) |i| {
-            image_available_semaphores[i] = try device.createSemaphore(&semaphore_info, null);
-            render_finished_semaphores[i] = try device.createSemaphore(&semaphore_info, null);
-            in_flight_fences[i] = try device.createFence(&fence_info, null);
-        }
-
-        return .{
-            .image_available_semaphores = image_available_semaphores,
-            .render_finished_semaphores = render_finished_semaphores,
-            .in_flight_fences = in_flight_fences,
-        };
-    }
-
-    pub fn resetImageAvailable(sync: *SyncObjects, device: vk.DeviceProxy) !void {
-        const semaphore_info = vk.SemaphoreCreateInfo{};
-        for (0..max_frames_in_flight) |i| {
-            device.destroySemaphore(sync.image_available_semaphores[i], null);
-            sync.image_available_semaphores[i] = try device.createSemaphore(&semaphore_info, null);
-        }
-    }
-
-    pub fn deinit(sync: SyncObjects, device: vk.DeviceProxy) void {
-        for (sync.image_available_semaphores) |semaphore| {
-            device.destroySemaphore(semaphore, null);
-        }
-        for (sync.render_finished_semaphores) |semaphore| {
-            device.destroySemaphore(semaphore, null);
-        }
-        for (sync.in_flight_fences) |fence| {
-            device.destroyFence(fence, null);
-        }
-    }
-};
-
-pub fn createCommandBuffers(
-    allocator: std.mem.Allocator,
-    device: vk.DeviceProxy,
-    command_pool: vk.CommandPool,
-    count: u32,
-) ![]vk.CommandBuffer {
-    const command_buffers = try allocator.alloc(vk.CommandBuffer, count);
-    errdefer allocator.free(command_buffers);
-
-    const command_buffer_info = vk.CommandBufferAllocateInfo{
-        .command_pool = command_pool,
-        .level = .primary,
-        .command_buffer_count = count,
-    };
-    try device.allocateCommandBuffers(&command_buffer_info, command_buffers.ptr);
-
-    return command_buffers;
-}
-
-pub const FrameSyncObjects = struct {
-    image_available_semaphore: vk.Semaphore,
-    render_finished_semaphore: vk.Semaphore,
-    in_flight_fence: vk.Fence,
-};
-
-pub fn present(
-    ctx: *const WindowContext,
-    command_buffer: vk.CommandBuffer,
-    sync: FrameSyncObjects,
-    swapchain: vk.SwapchainKHR,
-    image_index: u32,
-) !bool {
-    const vkc = ctx.backend.vkc;
-    const wait_semaphores = [_]vk.Semaphore{sync.image_available_semaphore};
-    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-    const signal_semaphores = [_]vk.Semaphore{sync.render_finished_semaphore};
-    const command_buffers = [_]vk.CommandBuffer{command_buffer};
-    const submit_info = vk.SubmitInfo{
-        .wait_semaphore_count = wait_semaphores.len,
-        .p_wait_semaphores = &wait_semaphores,
-        .p_wait_dst_stage_mask = &wait_stages,
-        .command_buffer_count = command_buffers.len,
-        .p_command_buffers = &command_buffers,
-        .signal_semaphore_count = signal_semaphores.len,
-        .p_signal_semaphores = &signal_semaphores,
-    };
-
-    const fences = [_]vk.Fence{sync.in_flight_fence};
-    try vkc.device.resetFences(fences.len, &fences);
-
-    const submits = [_]vk.SubmitInfo{submit_info};
-    try vkc.graphics_queue.submit(submits.len, &submits, sync.in_flight_fence);
-
-    const indices = [_]u32{image_index};
-    const swapchains = [_]vk.SwapchainKHR{swapchain};
-    const present_info = vk.PresentInfoKHR{
-        .wait_semaphore_count = signal_semaphores.len,
-        .p_wait_semaphores = &signal_semaphores,
-        .swapchain_count = swapchains.len,
-        .p_swapchains = &swapchains,
-        .p_image_indices = &indices,
-    };
-
-    const present_result = vkc.present_queue.presentKHR(&present_info) catch |err| {
-        if (err == error.OutOfDateKHR) {
-            return false;
-        }
-        return err;
-    };
-
-    if (present_result == .suboptimal_khr) {
-        return false;
-    }
-
-    return true;
 }
 
 pub const win = if (is_windows) struct {

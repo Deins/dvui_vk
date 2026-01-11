@@ -9,7 +9,7 @@ const DvuiVkBackend = dvui.backend;
 const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else void;
 const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
-const SyncObjects = DvuiVkBackend.SyncObjects;
+const SyncObjects = DvuiVkBackend.FrameSync;
 const slog = std.log.scoped(.main);
 
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
@@ -148,8 +148,8 @@ pub const AppState = struct {
             .max_frames_in_flight = max_frames_in_flight,
         });
 
-        const sync = try DvuiVkBackend.SyncObjects.init(b.vkc.device);
-        errdefer sync.deinit(b.vkc.device);
+        const sync = try SyncObjects.init(gpa, max_frames_in_flight, b.vkc.device);
+        errdefer sync.deinit(gpa, b.vkc.device);
 
         const depth_buffer = try DepthBuffer.init(
             b.vkc.device,
@@ -182,7 +182,7 @@ pub const AppState = struct {
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
         defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
-        defer self.sync.deinit(self.backend.vkc.device);
+        defer self.sync.deinit(gpa, self.backend.vkc.device);
         defer gpa.free(self.command_buffers);
     }
 
@@ -460,13 +460,12 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
     const sync = &app_state.sync;
+    const device = b.vkc.device;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    { // check/wait for previous frame to finish
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
-        std.debug.assert(result == .success);
-    }
+    try sync.begin(device);
+    defer sync.end();
 
     const command_buffer = app_state.command_buffers[current_frame_in_flight];
 
@@ -475,7 +474,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
         if (ctx.swapchain_state.?.framebuffers.len == 0) { // create framebuffer
             ctx.swapchain_state.?.framebuffers = try DvuiVkBackend.createFramebuffers(
                 gpa,
-                b.vkc.device,
+                device,
                 ctx.swapchain_state.?.swapchain.extent,
                 ctx.swapchain_state.?.swapchain.image_count,
                 ctx.swapchain_state.?.image_views,
@@ -484,10 +483,10 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
             );
             framebuffer_recreated = true;
         }
-        const next_image_result = b.vkc.device.acquireNextImageKHR(
+        const next_image_result = device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
             std.math.maxInt(u64),
-            sync.image_available_semaphores[current_frame_in_flight],
+            sync.imageAvailableSemaphore(),
             .null_handle,
         ) catch |err| {
             if (err == error.OutOfDateKHR) {
@@ -557,18 +556,14 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
         // b.setCursor(win.cursorRequested());
 
     }
-    const frame_sync_objects = DvuiVkBackend.FrameSyncObjects{
-        .image_available_semaphore = sync.image_available_semaphores[current_frame_in_flight],
-        .render_finished_semaphore = sync.render_finished_semaphores[current_frame_in_flight],
-        .in_flight_fence = sync.in_flight_fences[current_frame_in_flight],
-    };
+
     cmd.endRenderPass();
     cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
 
     if (!try DvuiVkBackend.present(
         ctx,
         app_state.command_buffers[current_frame_in_flight],
-        frame_sync_objects,
+        sync.items[sync.current_frame],
         ctx.swapchain_state.?.swapchain.handle,
         image_index,
     )) {

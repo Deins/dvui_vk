@@ -308,3 +308,247 @@ pub const WindowContext = struct {
         dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal });
     }
 };
+
+pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.RenderPass {
+    const color_attachment = vk.AttachmentDescription{
+        .format = image_format,
+        .samples = .{ .@"1_bit" = true },
+        .load_op = .clear,
+        .store_op = .store,
+        .stencil_load_op = .dont_care,
+        .stencil_store_op = .dont_care,
+        .initial_layout = .undefined,
+        .final_layout = .present_src_khr,
+    };
+
+    const color_attachment_refs = [_]vk.AttachmentReference{.{
+        .attachment = 0,
+        .layout = .color_attachment_optimal,
+    }};
+
+    const subpasses = [_]vk.SubpassDescription{.{
+        .pipeline_bind_point = .graphics,
+        .color_attachment_count = color_attachment_refs.len,
+        .p_color_attachments = &color_attachment_refs,
+    }};
+
+    const dependencies = [_]vk.SubpassDependency{.{
+        .src_subpass = vk.SUBPASS_EXTERNAL,
+        .dst_subpass = 0,
+        .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
+        .src_access_mask = .{},
+        .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
+        .dst_access_mask = .{ .color_attachment_write_bit = true },
+    }};
+
+    const attachments = [_]vk.AttachmentDescription{color_attachment};
+    const renderpass_info = vk.RenderPassCreateInfo{
+        .attachment_count = attachments.len,
+        .p_attachments = &attachments,
+        .subpass_count = subpasses.len,
+        .p_subpasses = &subpasses,
+        .dependency_count = dependencies.len,
+        .p_dependencies = &dependencies,
+    };
+
+    return device.createRenderPass(&renderpass_info, null);
+}
+
+pub fn createFramebuffers(
+    allocator: std.mem.Allocator,
+    device: vk.DeviceProxy,
+    extent: vk.Extent2D,
+    image_count: u32,
+    image_views: []const vk.ImageView,
+    shared_attachments: []const vk.ImageView,
+    render_pass: vk.RenderPass,
+) ![]vk.Framebuffer {
+    var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
+    errdefer {
+        for (framebuffers.items) |framebuffer| {
+            device.destroyFramebuffer(framebuffer, null);
+        }
+        framebuffers.deinit(allocator);
+    }
+
+    for (0..image_count) |i| {
+        var attachments = [1]vk.ImageView{.null_handle} ** 8;
+        attachments[0] = image_views[i];
+        std.debug.assert(shared_attachments.len < 7);
+        for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
+        const framebuffer_info = vk.FramebufferCreateInfo{
+            .render_pass = render_pass,
+            .attachment_count = @intCast(1 + shared_attachments.len),
+            .p_attachments = &attachments,
+            .width = extent.width,
+            .height = extent.height,
+            .layers = 1,
+        };
+
+        const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
+        framebuffers.appendAssumeCapacity(framebuffer);
+    }
+
+    return framebuffers.items;
+}
+
+pub fn destroyFramebuffers(allocator: std.mem.Allocator, device: vk.DeviceProxy, framebuffers: []const vk.Framebuffer) void {
+    for (framebuffers) |framebuffer| {
+        device.destroyFramebuffer(framebuffer, null);
+    }
+    allocator.free(framebuffers);
+}
+
+pub const FrameSync = struct {
+    pub const Frame = struct {
+        /// Signaled by vkAcquireNextImageKHR
+        /// GPU waits on this before starting rendering commands
+        /// Ensures the swapchain image is ready for rendering
+        image_available: vk.Semaphore = .null_handle,
+        /// Signaled when rendering commands finish
+        /// Presentation engine waits on this before presenting the image
+        /// GPU → GPU synchronization (graphics → present)
+        render_finished: vk.Semaphore = .null_handle,
+        /// CPU waits for GPU to be able to reuse frame resources
+        in_flight_fence: vk.Fence = .null_handle,
+
+        const vk_alloc = null;
+
+        pub fn init(device: vk.DeviceProxy) !Frame {
+            const semaphore_info = vk.SemaphoreCreateInfo{};
+            const fence_info = vk.FenceCreateInfo{ .flags = .{ .signaled_bit = true } };
+            const image_available = try device.createSemaphore(&semaphore_info, vk_alloc);
+            errdefer device.destroySemaphore(image_available, vk_alloc);
+            const render_finished = try device.createSemaphore(&semaphore_info, vk_alloc);
+            errdefer device.destroySemaphore(render_finished, vk_alloc);
+            const in_flight_fence = try device.createFence(&fence_info, vk_alloc);
+            errdefer device.destroySemaphore(in_flight_fence, vk_alloc);
+            return .{
+                .image_available = image_available,
+                .render_finished = render_finished,
+                .in_flight_fence = in_flight_fence,
+            };
+        }
+
+        pub fn deinit(it: Frame, device: vk.DeviceProxy) void {
+            if (it.image_available != .null_handle) device.destroySemaphore(it.image_available, null);
+            if (it.render_finished != .null_handle) device.destroySemaphore(it.render_finished, null);
+            if (it.in_flight_fence != .null_handle) device.destroyFence(it.in_flight_fence, null);
+        }
+    };
+
+    items: []Frame,
+    current_frame: u8 = 0,
+    frames_done: u56 = 0,
+
+    pub fn init(
+        alloc: std.mem.Allocator,
+        max_frames: u8,
+        device: vk.DeviceProxy,
+    ) !@This() {
+        const items = try alloc.alloc(Frame, max_frames);
+        for (items) |*it| it.* = .{};
+        errdefer for (items) |it| it.deinit(device);
+        for (items) |*it| it.* = try Frame.init(device);
+        return .{ .items = items };
+    }
+
+    pub fn deinit(sync: @This(), alloc: std.mem.Allocator, device: vk.DeviceProxy) void {
+        for (sync.items) |it| it.deinit(device);
+        alloc.free(sync.items);
+    }
+
+    pub fn inFlightFence(self: @This()) vk.Fence {
+        return self.items[self.current_frame].in_flight_fence;
+    }
+
+    pub fn imageAvailableSemaphore(self: @This()) vk.Semaphore {
+        return self.items[self.current_frame].image_available;
+    }
+
+    pub fn renderFinished(self: @This()) vk.Semaphore {
+        return self.items[self.current_frame].render_finished;
+    }
+
+    pub fn begin(sync: *@This(), device: vk.DeviceProxy) vk.DeviceProxy.WaitForFencesError!void {
+        sync.current_frame = @intCast(sync.frames_done % sync.items.len);
+        // check/wait for previous frame to finish
+        const result = try device.waitForFences(1, @ptrCast(&sync.items[sync.current_frame].in_flight_fence), .true, std.math.maxInt(u64));
+        std.debug.assert(result == .success); // no timeout is used, so if result is returned should be successes
+    }
+
+    pub fn end(sync: *@This()) void {
+        sync.frames_done += 1;
+    }
+};
+
+pub fn createCommandBuffers(
+    allocator: std.mem.Allocator,
+    device: vk.DeviceProxy,
+    command_pool: vk.CommandPool,
+    count: u32,
+) ![]vk.CommandBuffer {
+    const command_buffers = try allocator.alloc(vk.CommandBuffer, count);
+    errdefer allocator.free(command_buffers);
+
+    const command_buffer_info = vk.CommandBufferAllocateInfo{
+        .command_pool = command_pool,
+        .level = .primary,
+        .command_buffer_count = count,
+    };
+    try device.allocateCommandBuffers(&command_buffer_info, command_buffers.ptr);
+
+    return command_buffers;
+}
+
+pub fn present(
+    ctx: *const WindowContext,
+    command_buffer: vk.CommandBuffer,
+    sync: FrameSync.Frame,
+    swapchain: vk.SwapchainKHR,
+    image_index: u32,
+) !bool {
+    const vkc = ctx.backend.vkc;
+    const wait_semaphores = [_]vk.Semaphore{sync.image_available};
+    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
+    const signal_semaphores = [_]vk.Semaphore{sync.render_finished};
+    const command_buffers = [_]vk.CommandBuffer{command_buffer};
+    const submit_info = vk.SubmitInfo{
+        .wait_semaphore_count = wait_semaphores.len,
+        .p_wait_semaphores = &wait_semaphores,
+        .p_wait_dst_stage_mask = &wait_stages,
+        .command_buffer_count = command_buffers.len,
+        .p_command_buffers = &command_buffers,
+        .signal_semaphore_count = signal_semaphores.len,
+        .p_signal_semaphores = &signal_semaphores,
+    };
+
+    const fences = [_]vk.Fence{sync.in_flight_fence};
+    try vkc.device.resetFences(fences.len, &fences);
+
+    const submits = [_]vk.SubmitInfo{submit_info};
+    try vkc.graphics_queue.submit(submits.len, &submits, sync.in_flight_fence);
+
+    const indices = [_]u32{image_index};
+    const swapchains = [_]vk.SwapchainKHR{swapchain};
+    const present_info = vk.PresentInfoKHR{
+        .wait_semaphore_count = signal_semaphores.len,
+        .p_wait_semaphores = &signal_semaphores,
+        .swapchain_count = swapchains.len,
+        .p_swapchains = &swapchains,
+        .p_image_indices = &indices,
+    };
+
+    const present_result = vkc.present_queue.presentKHR(&present_info) catch |err| {
+        if (err == error.OutOfDateKHR) {
+            return false;
+        }
+        return err;
+    };
+
+    if (present_result == .suboptimal_khr) {
+        return false;
+    }
+
+    return true;
+}

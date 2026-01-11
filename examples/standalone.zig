@@ -8,7 +8,7 @@ const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else vo
 const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
 const slog = std.log.scoped(.main);
-const SyncObjects = DvuiVkBackend.SyncObjects;
+const SyncObjects = DvuiVkBackend.FrameSync;
 
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
@@ -64,8 +64,8 @@ pub const AppState = struct {
         const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
         errdefer b.vkc.device.destroyRenderPass(render_pass, null);
 
-        const sync = try DvuiVkBackend.SyncObjects.init(b.vkc.device);
-        errdefer sync.deinit(b.vkc.device);
+        const sync = try SyncObjects.init(gpa, max_frames_in_flight, b.vkc.device);
+        errdefer sync.deinit(gpa, b.vkc.device);
 
         const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
         errdefer gpa.free(command_buffers);
@@ -93,7 +93,7 @@ pub const AppState = struct {
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
         defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
-        defer self.sync.deinit(self.backend.vkc.device);
+        defer self.sync.deinit(gpa, self.backend.vkc.device);
         defer gpa.free(self.command_buffers);
     }
 };
@@ -114,14 +114,12 @@ pub fn main() !void {
     defer g_app_state.deinit(gpa);
     defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
-    var current_frame_in_flight: u32 = 0;
     main_loop: while (g_app_state.backend.contexts.items.len > 0) {
-        defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
         // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
                 for (g_app_state.backend.contexts.items) |ctx| {
-                    try paint(g_app_state, ctx, current_frame_in_flight);
+                    try paint(&g_app_state, ctx);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
                         _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
@@ -151,24 +149,23 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
     dvui.Examples.demo();
 }
 
-pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.WindowContext, current_frame_in_flight: usize) !void {
+pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     const b = ctx.backend;
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
-    const sync = app_state.sync;
+    const sync = &app_state.sync;
+    const device = b.vkc.device;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    { // check/wait for previous frame to finish
-        const result = try b.vkc.device.waitForFences(1, @ptrCast(&sync.in_flight_fences[current_frame_in_flight]), .true, std.math.maxInt(u64));
-        std.debug.assert(result == .success);
-    }
+    try sync.begin(device);
+    defer sync.end();
 
     const image_index = blk: while (true) {
         if (ctx.swapchain_state.?.framebuffers.len == 0) {
             ctx.swapchain_state.?.framebuffers = try DvuiVkBackend.createFramebuffers(
                 gpa,
-                b.vkc.device,
+                device,
                 ctx.swapchain_state.?.swapchain.extent,
                 ctx.swapchain_state.?.swapchain.image_count,
                 ctx.swapchain_state.?.image_views,
@@ -176,10 +173,10 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.WindowContext, current_fra
                 render_pass,
             );
         }
-        const next_image_result = b.vkc.device.acquireNextImageKHR(
+        const next_image_result = device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
             std.math.maxInt(u64),
-            sync.image_available_semaphores[current_frame_in_flight],
+            sync.imageAvailableSemaphore(),
             .null_handle,
         ) catch |err| {
             if (err == error.OutOfDateKHR) {
@@ -199,7 +196,7 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.WindowContext, current_fra
         break :blk next_image_result.image_index;
     };
 
-    const command_buffer = app_state.command_buffers[current_frame_in_flight];
+    const command_buffer = app_state.command_buffers[sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
     try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
     const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
@@ -240,18 +237,13 @@ pub fn paint(app_state: AppState, ctx: *DvuiVkBackend.WindowContext, current_fra
     // TODO: reenable
     // b.setCursor(win.cursorRequested());
 
-    const frame_sync_objects = DvuiVkBackend.FrameSyncObjects{
-        .image_available_semaphore = sync.image_available_semaphores[current_frame_in_flight],
-        .render_finished_semaphore = sync.render_finished_semaphores[current_frame_in_flight],
-        .in_flight_fence = sync.in_flight_fences[current_frame_in_flight],
-    };
     cmd.endRenderPass();
     cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
 
     if (!try DvuiVkBackend.present(
         ctx,
-        app_state.command_buffers[current_frame_in_flight],
-        frame_sync_objects,
+        app_state.command_buffers[sync.current_frame],
+        sync.items[sync.current_frame],
         ctx.swapchain_state.?.swapchain.handle,
         image_index,
     )) {
