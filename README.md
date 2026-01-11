@@ -3,13 +3,15 @@
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
 Targeting `vulkan 1.2` and `zig v0.15.1` (see tags for older ver)
 
-Backend is separated in two main parts:
-* [dvui_vulkan_renderer.zig](./src/dvui_vulkan_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc.
-    * Depends on [vulkan_zig](https://github.com/Snektron/vulkan-zig)
-* [dvui_vulkan.zig](./src/dvui_vulkan.zig)  - handles setup and platform specific functionality such as input&windowing. Also implements dvui app interface.  
-    Additionally depends on:
-    * [vk_kickstart](https://github.com/mikastiv/vk-kickstart.git)
-    * [zigwin32](https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c) (on Windows) 
+Backend is separated in parts:
+* [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc. Only dependency: [vulkan_zig](https://github.com/Snektron/vulkan-zig)
+* DVUI backend implementations:
+    * [dvui_vk_win32.zig](./src/dvui_vk_win32.zig) - backend based on native win32 api for windowing and input. (Windows only)
+        Has additional dependencies:
+        * [zigwin32](https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c) (on Windows) 
+    * [dvui_vk_win32.zig](./src/dvui_vk_glfw.zig) - backend based on glfw for windowing and input.
+    * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - common stuff for all backends.
+
 
 ### Current platform support
 Renderer alone should be cross-platform. Full 'batteries included' integration:
@@ -20,7 +22,7 @@ Renderer alone should be cross-platform. Full 'batteries included' integration:
 * Rendering:
     * textureRead()
     * option to pass in general purpose gpu memory allocator for textures
-    * linear color-space framebuffers. (easly switchable with source modifications, but tricky to expose).
+    * linear color space frame-buffers. (easily switchable with source modifications, but tricky to expose).
 * App/Platform functionality:
     * Variable frame rate (sleeping when inactive)
     * Touch events
@@ -45,6 +47,7 @@ zig build run -Dvk_registry=/path/to/vk.xml -Doptimize=ReleaseFast
 
 ### App example
 Similarly only target `run-app` instead of `run`
+For glfw backend add flag `-Dglfw`
 
 ### Standalone with vulkan 3D rendering
 `zig build run --build-file ./examples/3d/build.zig`  

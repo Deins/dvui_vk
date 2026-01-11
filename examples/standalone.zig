@@ -8,12 +8,12 @@ const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else vo
 const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
 const slog = std.log.scoped(.main);
-const SyncObjects = DvuiVkBackend.FrameSync;
+const FrameSync = DvuiVkBackend.FrameSync;
 
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
     render_pass: vk.RenderPass,
-    sync: SyncObjects,
+    sync: FrameSync,
     command_buffers: []vk.CommandBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
@@ -64,7 +64,7 @@ pub const AppState = struct {
         const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
         errdefer b.vkc.device.destroyRenderPass(render_pass, null);
 
-        const sync = try SyncObjects.init(gpa, max_frames_in_flight, b.vkc.device);
+        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
         errdefer sync.deinit(gpa, b.vkc.device);
 
         const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);

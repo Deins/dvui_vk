@@ -408,9 +408,7 @@ pub fn KeyCB(window: *glfw.Window, key: c_int, scancode: c_int, action: c_int, m
 pub fn CharCB(window: *glfw.Window, codepoint: c_uint) callconv(.c) void {
     var buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(@intCast(codepoint), &buf) catch unreachable;
-    _ = glfwWindowContext(window).dvui_window.addEventText(.{
-        .text = buf[0..len],
-    }) catch {};
+    _ = glfwWindowContext(window).dvui_window.addEventText(.{ .text = buf[0..len] }) catch {};
 }
 pub fn CharmodsCB(window: *glfw.Window, codepoint: c_uint, mods: c_int) callconv(.c) void {
     _ = window; // autofix
@@ -434,17 +432,13 @@ pub fn JoystickCB(id: c_int, event: c_int) callconv(.c) void {
 }
 
 pub fn glfwModDvui(mod: c_int) dvui.enums.Mod {
-    _ = mod; // autofix
-    // TODO: glfw mods is bitmask, so this needs to be reviewed
-    return switch (glfw.ModifierShift) {
-        glfw.ModifierShift => .lshift,
-        glfw.ModifierControl => .lcontrol,
-        glfw.ModifierAlt => .lalt,
-        glfw.ModifierSuper => .lcommand,
-        // glfw.ModifierCapsLock => ,
-        // glfw.ModifierNumLock => ,
-        else => .none,
-    };
+    if (0 != mod & glfw.ModifierShift) return .lshift;
+    if (0 != mod & glfw.ModifierControl) return .lcontrol;
+    if (0 != mod & glfw.ModifierAlt) return .lalt;
+    if (0 != mod & glfw.ModifierSuper) return .lcommand;
+    // glfw.ModifierCapsLock => ,
+    // glfw.ModifierNumLock => ,
+    return .none;
 }
 
 pub fn glfwMouseButtonToDvui(button: c_int) dvui.enums.Button {
