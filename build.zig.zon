@@ -12,7 +12,7 @@
         // dvui dependencies
 
         .vulkan = .{
-            //.path = "deps/vulkan-zig",
+            //.path = "vulkan-zig",
             .url = "git+https://github.com/Snektron/vulkan-zig#1446b0b994c2362264cc24513d7c7ec31b469c50",
             .hash = "vulkan-0.0.0-r7Ytx_VDAwAiMl0YSu2UOkVMIGJN7CeIQaxJR-hUSfD6",
         },
@@ -28,6 +28,17 @@
             .lazy = true,
         },
 
+        .glfw = .{
+            .url = "git+https://github.com/IridescenceTech/zglfw#188d33b5abdb24768905dec1dad6b3ffd60fc324",
+            .hash = "zglfw-0.1.0-BghZXaTUAAAkCOlD_2akK4k1zIzo6HIXelVZu39yr_MO",
+            .lazy = true,
+        },
+        .glfw_build = .{
+            .url = "git+https://github.com/tiawl/glfw.zig#83074bc9e1dd6b34ae5380bfff816ce0a3d9ffc1",
+            .hash = "glfw_zig-1.0.0-NrvYo8bXGQBjYIfoRj8XBqtJfR5G52TY_7Xr-bv6RBvb",
+            .lazy = true,
+        },
+
         // TODO: remove or make truly optional, here to ease debugging
         .ztracy = .{
             .url = "git+https://github.com/zig-gamedev/ztracy#e7b401dea9ce006f8b236e3a2ca1a9f3d5c3e896",
@@ -35,5 +46,5 @@
             .lazy = true,
         },
     },
-    .paths = .{""},
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

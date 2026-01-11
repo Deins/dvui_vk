@@ -49,6 +49,10 @@ pub fn build(b: *Build) !void {
     const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
     if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
 
+    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse false;
+    const glfw = if (glfw_on) b.lazyDependency("glfw", .{}) else null;
+    const glfw_build = if (glfw_on) b.lazyDependency("glfw_build", .{}) else null;
+
     // ZTracy
     const ztracy =
         //if (options.ztracy != .off)
@@ -80,7 +84,7 @@ pub fn build(b: *Build) !void {
         .flags = &.{ "-DINCLUDE_CUSTOM_LIBC_FUNCS=1", "-DSTBI_NO_STDLIB=1", "-DSTBIW_NO_STDLIB=1" },
     });
 
-    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = b.path("src/dvui_vulkan.zig") });
+    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = b.path("src/dvui_vk_win32.zig") });
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
@@ -137,9 +141,38 @@ pub fn build(b: *Build) !void {
     b.installArtifact(exe_standalone);
     b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
 
+    const exe_glfw = blk: {
+        if (glfw == null) break :blk null;
+        const exe_glfw_mod = b.addModule("glfw", .{
+            .root_source_file = b.path("examples/glfw.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "vulkan", .module = vkzig_bindings },
+                .{ .name = "glfw", .module = glfw.?.module("glfw") },
+                .{ .name = "dvui", .module = dvui_module },
+                .{ .name = "vulkan", .module = vkzig_bindings },
+            },
+        });
+
+        const exe_glfw = b.addExecutable(.{
+            .name = "glfw",
+            .root_module = exe_glfw_mod,
+        });
+        // exe_glfw.root_module.addImport("dvui", dvui_module);
+        if (target.result.os.tag == .windows) {
+            exe_glfw.win32_manifest = dvui_dep.path("./src/main.manifest");
+            exe_glfw.subsystem = .Windows;
+        }
+        exe_glfw.linkLibrary(glfw_build.?.artifact("glfw"));
+        b.installArtifact(exe_glfw);
+        b.step("run-glfw", "Run demo").dependOn(&b.addRunArtifact(exe_glfw).step);
+        break :blk exe_glfw;
+    };
+    _ = exe_glfw; // autofix
+
     { // Shaders
         const glslc = b.option(bool, "glslc", "Compile glsl shaders") orelse false;
-
         const slangc = b.option(bool, "slangc", "Compile slang shaders") orelse false;
         const shaders = compileShaders(b, "src", .{ .slang = if (slangc) .{} else null, .glsl = glslc, .optimize = optimize != .Debug });
 

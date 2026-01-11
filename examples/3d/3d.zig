@@ -102,7 +102,7 @@ pub const AppState = struct {
         errdefer b.deinit();
 
         // init backend (creates and owns OS window)
-        var window_context: *DvuiVkBackend.Context = try b.allocContext();
+        var window_context: *DvuiVkBackend.WindowContext = try b.allocContext();
         window_context.* = .{
             .backend = b,
             .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
@@ -115,9 +115,9 @@ pub const AppState = struct {
             .title = "3d example",
         });
 
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context);
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32);
 
-        window_context.swapchain_state = try DvuiVkBackend.Context.SwapchainState.init(window_context, .{
+        window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
             .present_queue_index = b.vkc.physical_device.present_queue_index,
             .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
@@ -167,7 +167,7 @@ pub const AppState = struct {
         };
     }
 
-    pub fn recreateSwapchain(self: *@This(), ctx: *DvuiVkBackend.Context) !void {
+    pub fn recreateSwapchain(self: *@This(), ctx: *DvuiVkBackend.WindowContext) !void {
         try ctx.swapchain_state.?.recreate(ctx);
         self.depth_buffer.deinit(g_app_state.device());
         self.depth_buffer = try DepthBuffer.init(
@@ -428,7 +428,7 @@ pub fn main() !void {
                     try paint(&g_app_state, ctx, current_frame_in_flight);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
-                        _ = win32.PostMessageA(ctx.hwnd, win32.WM_CLOSE, 0, 0);
+                        _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
                         continue;
                     }
                 }
@@ -438,7 +438,7 @@ pub fn main() !void {
     }
 }
 
-pub fn drawGUI(ctx: *DvuiVkBackend.Context) void {
+pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
     {
         // _ = dvui.windowHeader("settings", "", null);
         const m = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .gravity_y = 0 });
@@ -455,7 +455,7 @@ pub fn drawGUI(ctx: *DvuiVkBackend.Context) void {
     dvui.Examples.demo();
 }
 
-pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.Context, current_frame_in_flight: usize) !void {
+pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_frame_in_flight: usize) !void {
     const b = ctx.backend;
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
