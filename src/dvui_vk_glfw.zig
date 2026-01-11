@@ -67,7 +67,8 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
 }
 
 pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
-    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, @ptrCast(self.backend.vkc.alloc), @ptrCast(&self.surface));
+    const vk_alloc = null; // @ptrCast(self.backend.vkc.alloc) would be nice, but its not initialized yet
+    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, vk_alloc, @ptrCast(&self.surface));
     return res == .success;
 }
 
@@ -260,16 +261,17 @@ pub fn main() !void {
 
     const loader = getInstanceProcAddress;
     const init_opts = app.config.get();
-    var b = VkBackend.init(gpa, undefined);
+    var b = VkBackend.init(gpa, undefined); // the undefined sucks here, see comment about it at assignment
     defer b.deinit();
 
     // init backend (creates and owns OS window)
     var window_context: *WindowContext = try b.allocContext();
     window_context.* = .{
         .backend = &b,
-        .dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}),
+        .dvui_window = undefined,
         .hwnd = undefined,
     };
+    window_context.dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}); // this uses context, thats why called separately from constructor
     try initWindow(window_context, .{
         .dvui_gpa = gpa,
         .gpa = gpa,
@@ -279,7 +281,7 @@ pub fn main() !void {
     });
     const window = window_context.glfw_win;
     defer glfw.destroyWindow(window);
-
+    // TODO: this sucks, because to select vk.device we need window, it creates this nasty circular partial initialization nastiness.
     b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceGLFW);
 
     window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{

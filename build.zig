@@ -26,6 +26,7 @@ pub fn build(b: *Build) !void {
             "Enable Tracy fiber support",
         ) orelse false,
     };
+    var link_shaders_to = std.ArrayList(*std.Build.Step.Compile).initCapacity(b.allocator, 16) catch unreachable;
 
     // Vulkan
     const vk_registry_opt = b.option([]const u8, "vk_registry", "Path to vulkan registry vk.xml");
@@ -55,8 +56,7 @@ pub fn build(b: *Build) !void {
 
     // ZTracy
     const ztracy =
-        //if (options.ztracy != .off)
-        if (true)
+        if (options.ztracy != .off)
             b.lazyDependency("ztracy", .{
                 .enable_ztracy = options.ztracy != .off,
                 .enable_fibers = options.ztracy_fibers,
@@ -108,42 +108,48 @@ pub fn build(b: *Build) !void {
 
     //
     //   Examples
-    const exe_mod = b.addModule("app_mod", .{
-        .root_source_file = b.path("examples/app.zig"),
-        .target = target,
-        .optimize = optimize,
-        .link_libc = true,
-    });
-    const exe = b.addExecutable(.{
-        .name = "app_demo",
-        .root_module = exe_mod,
-    });
-    exe.root_module.addImport("dvui", dvui_module);
-    exe.root_module.addImport("vulkan", vkzig_bindings);
-    if (target.result.os.tag == .windows) {
-        exe.win32_manifest = dvui_dep.path("./src/main.manifest");
-        exe.subsystem = .Windows;
+    {
+        const exe_mod = b.addModule("app_mod", .{
+            .root_source_file = b.path("examples/app.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        const exe = b.addExecutable(.{
+            .name = "app_demo",
+            .root_module = exe_mod,
+        });
+        exe.root_module.addImport("dvui", dvui_module);
+        exe.root_module.addImport("vulkan", vkzig_bindings);
+        if (target.result.os.tag == .windows) {
+            exe.win32_manifest = dvui_dep.path("./src/main.manifest");
+            exe.subsystem = .Windows;
+        }
+        b.installArtifact(exe);
+        b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
+        link_shaders_to.append(b.allocator, exe) catch unreachable;
     }
-    b.installArtifact(exe);
-    b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
 
-    const exe_standalone_mod = b.addModule("standalone_mod", .{
-        .root_source_file = b.path("examples/standalone.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-    const exe_standalone = b.addExecutable(.{
-        .name = "standalone_demo",
-        .root_module = exe_standalone_mod,
-    });
-    exe_standalone.root_module.addImport("dvui", dvui_module);
-    exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
-    if (target.result.os.tag == .windows) {
-        exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
-        exe_standalone.subsystem = .Windows;
+    if (!glfw_on) {
+        const exe_standalone_mod = b.addModule("standalone_mod", .{
+            .root_source_file = b.path("examples/standalone.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const exe_standalone = b.addExecutable(.{
+            .name = "standalone_demo",
+            .root_module = exe_standalone_mod,
+        });
+        exe_standalone.root_module.addImport("dvui", dvui_module);
+        exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
+        if (target.result.os.tag == .windows) {
+            exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
+            exe_standalone.subsystem = .Windows;
+        }
+        b.installArtifact(exe_standalone);
+        b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
+        link_shaders_to.append(b.allocator, exe_standalone) catch unreachable;
     }
-    b.installArtifact(exe_standalone);
-    b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
 
     { // Shaders
         const glslc = b.option(bool, "glslc", "Compile glsl shaders") orelse false;
@@ -152,20 +158,12 @@ pub fn build(b: *Build) !void {
 
         // add shader modules
         for (shaders.items) |shader| {
-            exe.root_module.addAnonymousImport(shader.name, .{
+            for (link_shaders_to.items) |mod| mod.root_module.addAnonymousImport(shader.name, .{
                 .root_source_file = shader.path,
             });
-            exe_standalone.root_module.addAnonymousImport(shader.name, .{
-                .root_source_file = shader.path,
-            });
-            // exe_unit_tests.root_module.addAnonymousImport(shader.name, .{
-            //     .root_source_file = shader.path,
-            // });
             if (shader.step) |step| {
-                exe.step.dependOn(step);
-                exe_standalone.step.dependOn(step);
+                for (link_shaders_to.items) |mod| mod.step.dependOn(step);
             }
-            // if (shader.step) |step| exe_unit_tests.step.dependOn(step);
         }
     }
 }

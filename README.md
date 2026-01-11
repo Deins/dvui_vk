@@ -52,6 +52,5 @@ For glfw backend add flag `-Dglfw`
 ### Standalone with vulkan 3D rendering
 `zig build run --build-file ./examples/3d/build.zig`  
 Or alternatively `cd examples/3d` and `zig build run`.
-TODO: depth buffer.
 
 ![screenshot](examples/3d/screenshot.png)
