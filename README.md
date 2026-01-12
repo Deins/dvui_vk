@@ -16,7 +16,7 @@ Backend is separated in parts:
 ### Current platform support
 Renderer alone should be cross-platform. Full 'batteries included' integration:
 * ✔️ Windows
-* Linux - work in progress, using GLFW library. Use flag `-Dglfw` for app example.
+* Linux - using GLFW library. Use flag `-Dglfw`. Only app example implemented.
 
 ### todo - not yet implemented 🚧
 * Rendering:

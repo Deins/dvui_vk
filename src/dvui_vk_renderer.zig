@@ -234,7 +234,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     const device_local_mem_idx: u32 = blk: {
         for (opt.mem_props.memory_types[0..opt.mem_props.memory_type_count], 0..) |mem_type, i|
             if (mem_type.property_flags.device_local_bit and !mem_type.property_flags.host_visible_bit) {
-                slog.debug("chosen device local mem: {} {}", .{ i, mem_type });
+                // slog.debug("chosen device local mem: {} {}", .{ i, mem_type });
                 break :blk @truncate(i);
             };
         break :blk host_vis_mem_type_index;
@@ -363,7 +363,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
 
     const render_target_pass = try createOffscreenRenderPass(dev, img_format);
 
-    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, render_target_pass, opt.vk_alloc);
+    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, opt.render_pass, opt.vk_alloc);
     errdefer if (opt.pipeline == .null_handle) dev.destroyPipeline(pipeline, opt.vk_alloc);
 
     var res: Self = .{
@@ -487,10 +487,6 @@ pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.
     };
     dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
 
-    const PushConstants = struct {
-        view_scale: @Vector(2, f32),
-        view_translate: @Vector(2, f32),
-    };
     const push_constants = PushConstants{
         .view_scale = .{ 2.0 / framebuffer_size.w, 2.0 / framebuffer_size.h },
         .view_translate = .{ -1.0, -1.0 },
@@ -743,10 +739,6 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
         dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
     }
 
-    const PushConstants = struct {
-        view_scale: @Vector(2, f32),
-        view_translate: @Vector(2, f32),
-    };
     const push_constants = PushConstants{
         .view_scale = .{ 2.0 / w, 2.0 / h },
         .view_translate = .{ -1.0, -1.0 },
@@ -1159,7 +1151,7 @@ pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.Render
             .stencil_load_op = .dont_care,
             .stencil_store_op = .dont_care,
             .initial_layout = .undefined,
-            .final_layout = .present_src_khr,
+            .final_layout = .shader_read_only_optimal,
         };
         const color_attachment_ref = vk.AttachmentReference{
             .attachment = 0,
@@ -1233,6 +1225,11 @@ pub const VertexBindings = struct {
 };
 
 pub const tex_binding = 1; // shader binding slot must match shader
+
+const PushConstants = extern struct {
+    view_scale: [2]f32,
+    view_translate: [2]f32,
+};
 
 /// device memory min alignment
 /// we could query it at runtime, but this is reasonable safe number. We don't use this for anything critical.

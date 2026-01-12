@@ -28,6 +28,7 @@ pub const VkContext = struct {
         /// Array of required physical device extensions to enable.
         /// Note: VK_KHR_swapchain and VK_KHR_subset (if available) are automatically enabled.
         required_extensions: []const [*:0]const u8 = &.{},
+        required_layers: []const [*:0]const u8 = &.{},
     };
 
     pub fn init(
@@ -40,7 +41,11 @@ pub const VkContext = struct {
         const instance = try vkk.instance.create(
             allocator,
             loader,
-            .{ .required_api_version = opt.version },
+            .{
+                .required_api_version = opt.version,
+                .required_layers = opt.required_layers,
+                .enable_validation = builtin.mode == .Debug,
+            },
             null,
         );
         errdefer instance.destroyInstance(null);
@@ -73,7 +78,7 @@ pub const VkContext = struct {
         const graphics_queue_index = physical_device.graphics_queue_index;
         const present_queue_index = physical_device.present_queue_index;
         const graphics_queue_handle = device.getDeviceQueue(graphics_queue_index, 0);
-        const present_queue_handle = device.getDeviceQueue(present_queue_index, 0);
+        const present_queue_handle = if (present_queue_index) |pq| device.getDeviceQueue(pq, 0) else graphics_queue_handle;
         const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device.wrapper);
         const present_queue = vk.QueueProxy.init(present_queue_handle, device.wrapper);
 
@@ -144,7 +149,8 @@ pub const WindowContext = struct {
     backend: *VkBackend, // kindof unnecessary, for common cases single backend could be just global
     dvui_window: dvui.Window,
     received_close: bool = false,
-    resized: bool = false,
+    /// requests swapchain recreate with then latest_pixel_size. executed & flag reset on next image is acquire
+    recreate_swapchain_requested: bool = false,
 
     last_pixel_size: dvui.Size.Physical = .{ .w = 800, .h = 600 },
     last_window_size: dvui.Size.Natural = .{ .w = 800, .h = 600 },
@@ -168,7 +174,7 @@ pub const WindowContext = struct {
             desired_present_modes: []vk.PresentModeKHR = &.{},
         };
 
-        pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateOptions) !SwapchainState {
+        pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
             var swapchain = try vkk.Swapchain.create(
@@ -180,7 +186,7 @@ pub const WindowContext = struct {
                 options,
                 null,
             );
-            errdefer vkc.device.destroySwapchainKHR(swapchain.handle, null);
+            errdefer vkc.device.destroySwapchainKHR(swapchain.handle, vkc.alloc);
             slog.debug("created swapchain: {}X {}x{} {}", .{ swapchain.image_count, swapchain.extent.width, swapchain.extent.height, swapchain.image_format });
 
             const images: []vk.Image = try gpa.alloc(vk.Image, swapchain.image_count);
@@ -211,6 +217,7 @@ pub const WindowContext = struct {
 
             gpa.free(self.options.desired_present_modes);
             gpa.free(self.options.desired_formats);
+            vkc.device.destroySwapchainKHR(self.swapchain.handle, vkc.alloc);
         }
 
         pub fn recreate(self: *@This(), ctx: *WindowContext) !void {
@@ -230,7 +237,7 @@ pub const WindowContext = struct {
                 ctx.surface,
                 .{
                     .graphics_queue_index = vkc.physical_device.graphics_queue_index,
-                    .present_queue_index = vkc.physical_device.present_queue_index,
+                    .present_queue_index = vkc.physical_device.present_queue_index orelse vkc.physical_device.graphics_queue_index,
                     .desired_extent = extent,
                     .old_swapchain = old_swapchain.handle,
                     .desired_min_image_count = old_swapchain.image_count,
@@ -242,7 +249,6 @@ pub const WindowContext = struct {
             slog.debug("recreated swapchain: {}X {}x{} {}", .{ new_swapchain.image_count, new_swapchain.extent.width, new_swapchain.extent.height, new_swapchain.image_format });
             ctx.last_pixel_size.w = @floatFromInt(new_swapchain.extent.width);
             ctx.last_pixel_size.h = @floatFromInt(new_swapchain.extent.height);
-            vkc.device.destroySwapchainKHR(old_swapchain.handle, vkc.alloc);
 
             const options = self.options;
             self.options = .{};
@@ -258,8 +264,8 @@ pub const WindowContext = struct {
 
     pub fn deinit(self: *@This()) void {
         self.dvui_window.deinit();
-        self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
         if (self.swapchain_state) |*s| s.deinit(self);
+        self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
         self.* = undefined;
     }
 
@@ -591,6 +597,11 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
                 render_pass,
             );
         }
+        if (ctx.recreate_swapchain_requested) {
+            try ctx.swapchain_state.?.recreate(ctx);
+            ctx.recreate_swapchain_requested = false;
+            continue;
+        }
         const next_image_result = device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
             std.time.ns_per_ms * 100,
@@ -598,16 +609,17 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
             .null_handle,
         ) catch |err| {
             if (err == error.OutOfDateKHR) {
-                try ctx.swapchain_state.?.recreate(ctx);
-                continue; // need framebuffer
+                ctx.recreate_swapchain_requested = true;
+                continue;
             }
             return err;
         };
         switch (next_image_result.result) {
             .success => {},
             .suboptimal_khr => {
-                try ctx.swapchain_state.?.recreate(ctx);
-                continue; // need framebuffer
+                ctx.recreate_swapchain_requested = true;
+                // its stil valid to render, lets try to run with it for 1 frame
+                // continue;
             },
             else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
         }
