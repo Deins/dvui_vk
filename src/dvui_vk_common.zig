@@ -24,11 +24,14 @@ pub const VkContext = struct {
     }
 
     pub const Options = struct {
-        version: vk.Version = vk.API_VERSION_1_2,
-        /// Array of required physical device extensions to enable.
-        /// Note: VK_KHR_swapchain and VK_KHR_subset (if available) are automatically enabled.
-        required_extensions: []const [*:0]const u8 = &.{},
-        required_layers: []const [*:0]const u8 = &.{},
+        instance_settings: vkk.instance.CreateSettings = .{
+            .required_api_version = vk.API_VERSION_1_2,
+        },
+        device_select_settings: vkk.PhysicalDevice.SelectSettings = .{ .required_api_version = vk.API_VERSION_1_2, .required_extensions = &.{
+            vk.extensions.khr_swapchain.name,
+        } },
+        /// use to attach extension feature bits etc. to VkDeviceCreateInfo chain
+        device_create_info_p_next: ?*anyopaque = null,
     };
 
     pub fn init(
@@ -41,11 +44,7 @@ pub const VkContext = struct {
         const instance = try vkk.instance.create(
             allocator,
             loader,
-            .{
-                .required_api_version = opt.version,
-                .required_layers = opt.required_layers,
-                .enable_validation = builtin.mode == .Debug,
-            },
+            opt.instance_settings,
             null,
         );
         errdefer instance.destroyInstance(null);
@@ -55,24 +54,14 @@ pub const VkContext = struct {
 
         if (!createSurface(window_context, instance)) return error.FailedToCreateSurface;
 
-        const physical_device = try vkk.PhysicalDevice.select(allocator, instance, .{
-            .surface = window_context.surface,
-            .transfer_queue = .none,
-            .required_api_version = opt.version,
-            .required_extensions = opt.required_extensions,
-            .required_features = .{
-                .sampler_anisotropy = .true,
-            },
-            .required_features_12 = .{
-                .descriptor_indexing = .true,
-            },
-        });
+        var select_settings = opt.device_select_settings;
+        if (select_settings.surface != .null_handle) unreachable;
+        select_settings.surface = window_context.surface;
+        const physical_device = try vkk.PhysicalDevice.select(allocator, instance, select_settings);
 
         std.log.info("selected {s}", .{physical_device.name()});
 
-        var features = vk.PhysicalDeviceRayTracingPipelineFeaturesKHR{};
-
-        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(&features), null);
+        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(opt.device_create_info_p_next), null);
         errdefer device.destroyDevice(null);
 
         const graphics_queue_index = physical_device.graphics_queue_index;
@@ -259,6 +248,59 @@ pub const WindowContext = struct {
             try self.swapchain.getImages(self.images);
             self.image_views = try self.swapchain.getImageViewsAlloc(gpa, self.images, vkc.alloc);
             self.framebuffers = &.{};
+        }
+
+        pub fn acquireImage(
+            swapchain_state: *@This(),
+            gpa: std.mem.Allocator,
+            ctx: *WindowContext,
+            sync: FrameSync,
+            shared_attachments: []const vk.ImageView,
+            render_pass: vk.RenderPass,
+        ) !u32 {
+            const vkc = ctx.backend.vkc;
+            const device = vkc.device;
+            const image_index = blk: while (true) {
+                if (swapchain_state.framebuffers.len == 0) {
+                    swapchain_state.framebuffers = try createFramebuffers(
+                        gpa,
+                        device,
+                        swapchain_state.swapchain.extent,
+                        swapchain_state.swapchain.image_count,
+                        swapchain_state.image_views,
+                        shared_attachments,
+                        render_pass,
+                    );
+                }
+                if (ctx.recreate_swapchain_requested) {
+                    try swapchain_state.recreate(ctx);
+                    ctx.recreate_swapchain_requested = false;
+                    continue;
+                }
+                const next_image_result = device.acquireNextImageKHR(
+                    ctx.swapchain_state.?.swapchain.handle,
+                    std.time.ns_per_ms * 100,
+                    sync.imageAvailableSemaphore(),
+                    .null_handle,
+                ) catch |err| {
+                    if (err == error.OutOfDateKHR) {
+                        ctx.recreate_swapchain_requested = true;
+                        continue;
+                    }
+                    return err;
+                };
+                switch (next_image_result.result) {
+                    .success => {},
+                    .suboptimal_khr => {
+                        ctx.recreate_swapchain_requested = true;
+                        // its stil valid to render, lets try to run with it for 1 frame
+                        // continue;
+                    },
+                    else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
+                }
+                break :blk next_image_result.image_index;
+            };
+            return image_index; // autofix
         }
     };
 
@@ -584,47 +626,7 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     // wait for previous frame to finish
     try app_state.sync.begin(device);
     defer app_state.sync.end();
-
-    const image_index = blk: while (true) {
-        if (ctx.swapchain_state.?.framebuffers.len == 0) {
-            ctx.swapchain_state.?.framebuffers = try createFramebuffers(
-                gpa,
-                device,
-                ctx.swapchain_state.?.swapchain.extent,
-                ctx.swapchain_state.?.swapchain.image_count,
-                ctx.swapchain_state.?.image_views,
-                &.{},
-                render_pass,
-            );
-        }
-        if (ctx.recreate_swapchain_requested) {
-            try ctx.swapchain_state.?.recreate(ctx);
-            ctx.recreate_swapchain_requested = false;
-            continue;
-        }
-        const next_image_result = device.acquireNextImageKHR(
-            ctx.swapchain_state.?.swapchain.handle,
-            std.time.ns_per_ms * 100,
-            app_state.sync.imageAvailableSemaphore(),
-            .null_handle,
-        ) catch |err| {
-            if (err == error.OutOfDateKHR) {
-                ctx.recreate_swapchain_requested = true;
-                continue;
-            }
-            return err;
-        };
-        switch (next_image_result.result) {
-            .success => {},
-            .suboptimal_khr => {
-                ctx.recreate_swapchain_requested = true;
-                // its stil valid to render, lets try to run with it for 1 frame
-                // continue;
-            },
-            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
-        }
-        break :blk next_image_result.image_index;
-    };
+    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, app_state.sync, &.{}, render_pass);
 
     const command_buffer = app_state.command_buffers[app_state.sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];

@@ -45,11 +45,16 @@ pub const AppState = struct {
             .title = "My window",
         });
 
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{});
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{
+            .device_select_settings = .{ .required_extensions = &.{
+                vk.extensions.khr_swapchain.name,
+            } },
+        });
 
         window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-            .present_queue_index = b.vkc.physical_device.present_queue_index,
+            .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
+            .desired_min_image_count = max_frames_in_flight,
             .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
             .desired_formats = &.{
                 // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
@@ -160,41 +165,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     try sync.begin(device);
     defer sync.end();
-
-    const image_index = blk: while (true) {
-        if (ctx.swapchain_state.?.framebuffers.len == 0) {
-            ctx.swapchain_state.?.framebuffers = try DvuiVkBackend.createFramebuffers(
-                gpa,
-                device,
-                ctx.swapchain_state.?.swapchain.extent,
-                ctx.swapchain_state.?.swapchain.image_count,
-                ctx.swapchain_state.?.image_views,
-                &.{},
-                render_pass,
-            );
-        }
-        const next_image_result = device.acquireNextImageKHR(
-            ctx.swapchain_state.?.swapchain.handle,
-            std.math.maxInt(u64),
-            sync.imageAvailableSemaphore(),
-            .null_handle,
-        ) catch |err| {
-            if (err == error.OutOfDateKHR) {
-                try ctx.swapchain_state.?.recreate(ctx);
-                continue; // need framebuffer
-            }
-            return err;
-        };
-        switch (next_image_result.result) {
-            .success => {},
-            .suboptimal_khr => {
-                try ctx.swapchain_state.?.recreate(ctx);
-                continue; // need framebuffer
-            },
-            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
-        }
-        break :blk next_image_result.image_index;
-    };
+    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, sync.*, &.{}, render_pass);
 
     const command_buffer = app_state.command_buffers[sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
@@ -242,7 +213,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     if (!try DvuiVkBackend.present(
         ctx,
-        app_state.command_buffers[sync.current_frame],
+        command_buffer,
         sync.items[sync.current_frame],
         ctx.swapchain_state.?.swapchain.handle,
         image_index,

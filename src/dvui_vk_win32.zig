@@ -280,14 +280,16 @@ pub fn main() !void {
 
     window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
         .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-        .present_queue_index = b.vkc.physical_device.present_queue_index,
+        .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
         .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
+        .desired_min_image_count = max_frames_in_flight,
         .desired_formats = &.{
             // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
             // TODO: add support for both linear and srgb render targets
             // similar issue: https://github.com/ocornut/imgui/issues/578
-            // .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
+            .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
             .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+            .{ .format = .r8g8b8a8_unorm, .color_space = .srgb_nonlinear_khr },
         },
         .desired_present_modes = if (!init_opts.vsync) &.{.immediate_khr} else &.{.fifo_khr},
     });
@@ -576,6 +578,7 @@ pub const win = if (is_windows) struct {
                 slog.debug("WM_DESTROY", .{});
                 if (maybe_context) |ctx| {
                     _ = win32.SetWindowLongPtrW(@ptrCast(ctx.hwnd), win32.WINDOW_LONG_PTR_INDEX._USERDATA, 0); // deatach context
+                    ctx.backend.vkc.device.queueWaitIdle(ctx.backend.vkc.graphics_queue.handle) catch {};
                     ctx.backend.destroyContext(ctx);
                     if (0 != win32.DestroyWindow(@ptrCast(ctx.hwnd))) slog.err("Failed to close window!", .{});
                 }

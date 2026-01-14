@@ -1,22 +1,18 @@
 # Vulkan Backend for dvui
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.2` and `zig v0.15.1` (see tags for older ver)
+Targeting `vulkan 1.2` an newer and `zig v0.15.1` (see tags for older ver)
+
+### Current platform support
+* Windows
+* Linux - through use of GLFW library for windowing. Use flag `-Dglfw`. Only app example implemented at the moment.
 
 Backend is separated in parts:
 * [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc. Only dependency: [vulkan_zig](https://github.com/Snektron/vulkan-zig)
-* DVUI backend implementations:
+* DVUI backend implementations, has additional dependencies (see build.zig.zon):
     * [dvui_vk_win32.zig](./src/dvui_vk_win32.zig) - backend based on native win32 api for windowing and input. (Windows only)
-        Has additional dependencies:
-        * [zigwin32](https://github.com/marlersoft/zigwin32#be58d3816810c1e4c20781cc7223a60906467d3c) (on Windows) 
-    * [dvui_vk_win32.zig](./src/dvui_vk_glfw.zig) - backend based on glfw for windowing and input.
-    * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - common stuff for all backends.
-
-
-### Current platform support
-Renderer alone should be cross-platform. Full 'batteries included' integration:
-* ✔️ Windows
-* Linux - using GLFW library. Use flag `-Dglfw`. Only app example implemented.
+    * [dvui_vk_glfw.zig](./src/dvui_vk_glfw.zig) - backend based on glfw for windowing and input. Use `-Dglfw` build flag to enable.
+    * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - additional common stuff used by all backends.
 
 ### todo - not yet implemented 🚧
 * Rendering:

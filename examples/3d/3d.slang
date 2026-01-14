@@ -11,9 +11,7 @@ struct VSOutput
 
 struct PushConstants
 {
-    float4x4 model;
-    float4x4 view;
-    float4x4 projection;
+    float4x4 mvp;
 };
 [[push_constant]]
 ConstantBuffer<PushConstants> push_constants;
@@ -22,7 +20,8 @@ ConstantBuffer<PushConstants> push_constants;
 VSOutput vertexMain(VSInput input)
 {
     VSOutput output;
-    float4x4 mvp = mul(push_constants.model, mul(push_constants.view, push_constants.projection));
+    // float4x4 mvp = mul(push_constants.model, mul(push_constants.view, push_constants.projection));
+    float4x4 mvp = push_constants.mvp;
     float4 clipPos = mul(float4(input.pos.xyz, 1.0), mvp);
     output.pos = clipPos;
     output.col = float4(debugColorFromID((uint)input.pos.w), 1.0);

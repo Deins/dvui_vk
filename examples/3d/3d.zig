@@ -115,16 +115,23 @@ pub const AppState = struct {
             .title = "3d example",
         });
 
+        var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
+            .extended_dynamic_state = .true,
+        };
         b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{
-            .version = vk.API_VERSION_1_2,
-            .required_extensions = &.{
-                vk.extensions.ext_extended_dynamic_state.name, // for dynamic depth on/off
+            .device_select_settings = .{
+                .required_extensions = &.{
+                    vk.extensions.khr_swapchain.name,
+                    vk.extensions.ext_extended_dynamic_state.name, // for dynamic depth on/off
+                },
             },
+            .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
         });
 
         window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-            .present_queue_index = b.vkc.physical_device.present_queue_index,
+            .present_queue_index = b.vkc.physical_device.present_queue_index orelse b.vkc.physical_device.graphics_queue_index,
+            .desired_min_image_count = max_frames_in_flight,
             .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
             .desired_formats = &.{
                 // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
@@ -321,18 +328,20 @@ pub const Scene = struct {
         // };
         // push_constants.projection = push_constants.projection.mulMatrix(4, push_constants.model);
         const PushConstants = extern struct {
-            model: zm.Mat,
-            view: zm.Mat,
-            projection: zm.Mat,
+            // model: zm.Mat,
+            // view: zm.Mat,
+            // projection: zm.Mat,
+            mvp: zm.Mat,
         };
         const t: f32 = @as(f32, @floatFromInt(self.timer.read() / std.time.ns_per_ms)) / 1000; // sec f32
         const rotation = zm.mul(zm.rotationX(t), zm.rotationY(t));
+        const model = zm.mul(rotation, zm.translation(0, 0, -10));
+        const view = zm.identity();
+        const projection = zm.perspectiveFovRh(std.math.degreesToRadians(60.0), framebuffer_size.w / framebuffer_size.h, 0.01, 100);
         const push_constants = PushConstants{
-            .model = zm.mul(rotation, zm.translation(0, 0, -10)),
-            .view = zm.identity(),
-            .projection = zm.perspectiveFovRh(std.math.degreesToRadians(60.0), framebuffer_size.w / framebuffer_size.h, 0.01, 100),
+            .mvp = zm.mul(model, zm.mul(view, projection)),
         };
-        if (@sizeOf(f32) * 4 * 4 * 3 != @sizeOf(@TypeOf(push_constants))) unreachable;
+        if (@sizeOf(f32) * 4 * 4 != @sizeOf(@TypeOf(push_constants))) unreachable;
         dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
 
         dev.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, .uint16);
@@ -414,7 +423,6 @@ pub fn main() !void {
 
     g_app_state = try AppState.init(gpa);
     defer g_app_state.deinit(gpa);
-    defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
     g_scene = try Scene.init();
     defer g_scene.deinit();
@@ -423,14 +431,13 @@ pub fn main() !void {
     g_app_state.device().destroyPipeline(g_app_state.backend.renderer.?.pipeline, g_app_state.backend.renderer.?.vk_alloc);
     g_app_state.backend.renderer.?.pipeline = try createDvuiPipeline(g_app_state.device(), g_app_state.backend.renderer.?.pipeline_layout, g_app_state.render_pass, g_app_state.backend.renderer.?.vk_alloc);
 
-    var current_frame_in_flight: u32 = 0;
+    defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
     main_loop: while (g_app_state.backend.contexts.items.len > 0) {
-        defer current_frame_in_flight = (current_frame_in_flight + 1) % max_frames_in_flight;
         // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
                 for (g_app_state.backend.contexts.items) |ctx| {
-                    try paint(&g_app_state, ctx, current_frame_in_flight);
+                    try paint(&g_app_state, ctx);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
                         _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
@@ -460,7 +467,7 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
     dvui.Examples.demo();
 }
 
-pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_frame_in_flight: usize) !void {
+pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     const b = ctx.backend;
     const gpa = b.gpa;
     const render_pass = app_state.render_pass;
@@ -469,52 +476,15 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
+    // wait for previous frame to finish
     try sync.begin(device);
     defer sync.end();
-
-    const command_buffer = app_state.command_buffers[current_frame_in_flight];
-
-    var framebuffer_recreated = false;
-    const image_index = blk: while (true) {
-        if (ctx.swapchain_state.?.framebuffers.len == 0) { // create framebuffer
-            ctx.swapchain_state.?.framebuffers = try DvuiVkBackend.createFramebuffers(
-                gpa,
-                device,
-                ctx.swapchain_state.?.swapchain.extent,
-                ctx.swapchain_state.?.swapchain.image_count,
-                ctx.swapchain_state.?.image_views,
-                &[1]vk.ImageView{g_app_state.depth_buffer.view},
-                render_pass,
-            );
-            framebuffer_recreated = true;
-        }
-        const next_image_result = device.acquireNextImageKHR(
-            ctx.swapchain_state.?.swapchain.handle,
-            std.math.maxInt(u64),
-            sync.imageAvailableSemaphore(),
-            .null_handle,
-        ) catch |err| {
-            if (err == error.OutOfDateKHR) {
-                try g_app_state.recreateSwapchain(ctx);
-                continue; // need framebuffer
-            }
-            return err;
-        };
-        switch (next_image_result.result) {
-            .success => break :blk next_image_result.image_index,
-            .suboptimal_khr => {
-                try g_app_state.recreateSwapchain(ctx);
-                continue; // need framebuffer
-            },
-            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
-        }
-    };
-    // slog.debug("paint current frame {} image_index {}", .{ current_frame_in_flight, image_index });
+    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, sync.*, &[1]vk.ImageView{g_app_state.depth_buffer.view}, render_pass);
 
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
-    try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
-    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
-    // if (framebuffer_recreated) g_app_state.depth_buffer.transition(g_app_state.device(), command_buffer);
+    const command_buffer = app_state.command_buffers[sync.current_frame];
+    try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
+    const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
 
     const clear_values = [_]vk.ClearValue{
         .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
@@ -567,7 +537,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext, current_fr
 
     if (!try DvuiVkBackend.present(
         ctx,
-        app_state.command_buffers[current_frame_in_flight],
+        command_buffer,
         sync.items[sync.current_frame],
         ctx.swapchain_state.?.swapchain.handle,
         image_index,
