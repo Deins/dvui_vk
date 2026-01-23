@@ -1,0 +1,16 @@
+name: compile
+run-name: ${{ github.actor }} compile linux
+on: [push]
+jobs:
+  compile-linux-glfw:
+    runs-on: ubuntu-latest
+    name: Build and Test
+    steps:
+      - uses: actions/checkout@v3
+      - uses: mlugg/setup-zig@v2
+
+      - name: Build with GLFW
+        run: |
+          zig build run-app \
+            -Dglfw \
+            -Dvk_registry=$HOME/.cache/vulkan/vk.xml
