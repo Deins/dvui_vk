@@ -9,7 +9,7 @@ const DvuiVkBackend = dvui.backend;
 const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else void;
 const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
-const SyncObjects = DvuiVkBackend.FrameSync;
+const FrameSync = DvuiVkBackend.FrameSync;
 const slog = std.log.scoped(.main);
 
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
@@ -21,6 +21,7 @@ pub const DepthBuffer = struct {
     image: vk.Image,
     view: vk.ImageView,
     memory: vk.DeviceMemory,
+    size: vk.Extent2D,
     const vk_alloc = null;
     const format = vk.Format.d32_sfloat;
 
@@ -70,6 +71,7 @@ pub const DepthBuffer = struct {
             .image = image,
             .view = view,
             .memory = mem,
+            .size = size,
         };
     }
     pub fn deinit(self: @This(), dev: vk.DeviceProxy) void {
@@ -82,7 +84,7 @@ pub const DepthBuffer = struct {
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
     render_pass: vk.RenderPass,
-    sync: SyncObjects,
+    sync: FrameSync,
     command_buffers: []vk.CommandBuffer,
     depth_buffer: DepthBuffer,
 
@@ -108,11 +110,11 @@ pub const AppState = struct {
             .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
             .hwnd = undefined,
         };
-        try win.initWindow(window_context, .{
-            .registered_class = window_class,
+        try win.initWindow(window_context, window_class, .{
             .dvui_gpa = gpa,
             .gpa = gpa,
             .title = "3d example",
+            .vsync = false,
         });
 
         var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
@@ -160,7 +162,7 @@ pub const AppState = struct {
             .max_frames_in_flight = max_frames_in_flight,
         });
 
-        const sync = try SyncObjects.init(gpa, max_frames_in_flight, b.vkc.device);
+        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
         errdefer sync.deinit(gpa, b.vkc.device);
 
         const depth_buffer = try DepthBuffer.init(
@@ -479,7 +481,15 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     // wait for previous frame to finish
     try sync.begin(device);
     defer sync.end();
-    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, sync.*, &[1]vk.ImageView{g_app_state.depth_buffer.view}, render_pass);
+    const image_index = try acquireImageMaybeRecreate(
+        &ctx.swapchain_state.?,
+        gpa,
+        ctx,
+        sync.*,
+
+        render_pass,
+        b.renderer.?.device_local_mem_idx,
+    );
 
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
     const command_buffer = app_state.command_buffers[sync.current_frame];
@@ -542,7 +552,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         ctx.swapchain_state.?.swapchain.handle,
         image_index,
     )) {
-        // should_recreate_swapchain = true;
+        // ctx.recreate_swapchain_requested = true;
         slog.err("present failed!", .{});
     }
     // slog.debug("frame done", .{});
@@ -753,6 +763,56 @@ fn createPipeline(
         @ptrCast(&pipeline),
     );
     return pipeline;
+}
+
+// similar dvui_vk_common.acquire.. because of depth buffer
+pub fn acquireImageMaybeRecreate(
+    swapchain_state: *DvuiVkBackend.WindowContext.SwapchainState,
+    gpa: std.mem.Allocator,
+    ctx: *DvuiVkBackend.WindowContext,
+    sync: FrameSync,
+    render_pass: vk.RenderPass, // for framebuffer recreate
+    device_local_mem_idx: u32, // mem where to create depth buffer
+) !u32 {
+    const vkc = ctx.backend.vkc;
+    const device = vkc.device;
+    const image_index = blk: while (true) {
+        if (try swapchain_state.maybeResize(ctx)) {
+            // recreate depth
+            g_app_state.depth_buffer.deinit(device);
+            g_app_state.depth_buffer = try DepthBuffer.init(
+                vkc.device,
+                ctx.swapchain_state.?.swapchain.extent,
+                device_local_mem_idx,
+            );
+        }
+        const shared_attachments = &[1]vk.ImageView{g_app_state.depth_buffer.view};
+        _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
+
+        const next_image_result = device.acquireNextImageKHR(
+            ctx.swapchain_state.?.swapchain.handle,
+            std.math.maxInt(u64),
+            sync.imageAvailableSemaphore(),
+            .null_handle,
+        ) catch |err| {
+            if (err == error.OutOfDateKHR) {
+                ctx.recreate_swapchain_requested = true;
+                continue;
+            }
+            return err;
+        };
+        switch (next_image_result.result) {
+            .success => {},
+            .suboptimal_khr => {
+                ctx.recreate_swapchain_requested = true;
+                // its stil valid to render, lets try to run with it for 1 frame
+                // continue;
+            },
+            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
+        }
+        break :blk next_image_result.image_index;
+    };
+    return image_index; // autofix
 }
 
 const VertexBindings = struct {

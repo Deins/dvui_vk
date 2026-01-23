@@ -17,54 +17,20 @@ pub const AppState = struct {
     command_buffers: []vk.CommandBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
-        const window_class = win32.L("DvuiWindow");
-        win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-            "RegisterClass",
-            win32.GetLastError(),
-        );
-
         vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
         errdefer vk_dll.deinit();
         const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
 
-        var b = try gpa.create(DvuiVkBackend.VkBackend);
-        b.* = DvuiVkBackend.VkBackend.init(gpa, undefined);
-        errdefer b.deinit();
-
         // init backend (creates and owns OS window)
-        var window_context: *DvuiVkBackend.WindowContext = try b.allocContext();
-        window_context.* = .{
-            .backend = b,
-            .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
-            .hwnd = undefined,
-        };
-        try win.initWindow(window_context, .{
-            .registered_class = window_class,
+        const iw = try DvuiVkBackend.initWindow(loader, .{
+            .title = "standalone",
             .dvui_gpa = gpa,
             .gpa = gpa,
-            .title = "My window",
+            .max_frames_in_flight = max_frames_in_flight,
+            .vsync = vsync,
         });
-
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{
-            .device_select_settings = .{ .required_extensions = &.{
-                vk.extensions.khr_swapchain.name,
-            } },
-        });
-
-        window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
-            .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-            .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
-            .desired_min_image_count = max_frames_in_flight,
-            .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
-            .desired_formats = &.{
-                // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
-                // TODO: add support for both linear and srgb render targets
-                // similar issue: https://github.com/ocornut/imgui/issues/578
-                // .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
-                .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
-            },
-            .desired_present_modes = if (!vsync) &.{.immediate_khr} else &.{.fifo_khr},
-        });
+        const b = iw.backend;
+        const window_context = iw.window;
 
         const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
         errdefer b.vkc.device.destroyRenderPass(render_pass, null);
@@ -165,7 +131,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     try sync.begin(device);
     defer sync.end();
-    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, sync.*, &.{}, render_pass);
+    const image_index = try ctx.swapchain_state.?.acquireImageMaybeRecreate(gpa, ctx, sync.*, &.{}, render_pass);
 
     const command_buffer = app_state.command_buffers[sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];

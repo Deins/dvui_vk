@@ -10,9 +10,6 @@ comptime {
 pub const VkRenderer = @import("dvui_vk_renderer.zig");
 
 pub const InitOptions = struct {
-    /// [windows os only] A windows class that has previously been registered via RegisterClass.
-    registered_class: [*:0]const u16,
-
     dvui_gpa: std.mem.Allocator,
     /// The allocator used for temporary allocations used during init()
     gpa: std.mem.Allocator,
@@ -24,7 +21,64 @@ pub const InitOptions = struct {
     /// content of a PNG image (or any other format stb_image can load)
     /// tip: use @embedFile
     icon: ?[]const u8 = null,
+
+    vsync: bool,
+
+    max_frames_in_flight: u8 = 2,
+    desired_surface_formats: []const vk.SurfaceFormatKHR = &.{
+        // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb format. To support linear rendering this will be an issue.
+        // TODO: add support for both linear and srgb render targets
+        // similar issue: https://github.com/ocornut/imgui/issues/578
+        .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+        .{ .format = .r8g8b8a8_unorm, .color_space = .srgb_nonlinear_khr },
+    },
 };
+
+pub const InitWindowResult = struct {
+    backend: *VkBackend,
+    window: *WindowContext,
+    pub fn deinit(self: InitWindowResult) void {
+        self.backend.deinit(); // will clean up all windows, don't destroy window as its done from win32 callbacks
+        self.backend.gpa.destroy(self.backend);
+    }
+};
+
+// init backend (creates and owns OS window)
+pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !InitWindowResult {
+    const gpa = init_opts.dvui_gpa;
+
+    const window_class = win32.L("DvuiWindow");
+    win.RegisterClass(window_class, .{}) catch win32.panicWin32(
+        "RegisterClass",
+        win32.GetLastError(),
+    );
+
+    // TODO: on error cleanup here is messy because we need to get surface to init vk. More likely than not if error happens we will leak or crash here.
+    const b = try gpa.create(VkBackend);
+    errdefer gpa.destroy(b);
+    b.* = VkBackend.init(gpa, undefined);
+    const window_context: *WindowContext = try b.allocContext();
+    window_context.* = .{
+        .backend = b,
+        .dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}),
+        .hwnd = undefined,
+    };
+    errdefer window_context.dvui_window.deinit();
+    try win.initWindow(window_context, window_class, init_opts);
+    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{});
+    errdefer b.deinit();
+
+    window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
+        .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
+        .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
+        .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
+        .desired_min_image_count = init_opts.max_frames_in_flight,
+        .desired_formats = init_opts.desired_surface_formats,
+        .desired_present_modes = if (!init_opts.vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr },
+    });
+    return .{ .backend = b, .window = window_context };
+}
 
 pub const vk = @import("vk");
 pub const dvui_vk_common = @import("dvui_vk_common.zig");
@@ -37,7 +91,6 @@ pub const destroyFramebuffers = dvui_vk_common.destroyFramebuffers;
 pub const FrameSync = dvui_vk_common.FrameSync;
 pub const createCommandBuffers = dvui_vk_common.createCommandBuffers;
 pub const present = dvui_vk_common.present;
-pub const max_frames_in_flight = 3;
 
 pub const GenericError = dvui.Backend.GenericError;
 pub const TextureError = dvui.Backend.TextureError;
@@ -245,54 +298,25 @@ pub fn main() !void {
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
-    const window_class = win32.L("DvuiWindow");
-    win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-        "RegisterClass",
-        win32.GetLastError(),
-    );
-
     const init_opts = app.config.get();
 
     vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
     defer vk_dll.deinit();
     const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
 
-    var b = VkBackend.init(gpa, undefined);
-    defer b.deinit();
-
-    // init backend (creates and owns OS window)
-    var window_context: *WindowContext = try b.allocContext();
-    window_context.* = .{
-        .backend = &b,
-        .dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{}),
-        .hwnd = undefined,
-    };
-    try win.initWindow(window_context, .{
-        .registered_class = window_class,
-        .dvui_gpa = gpa,
-        .gpa = gpa,
-        .size = init_opts.size,
+    const max_frames_in_flight = 2;
+    const iw = try initWindow(loader, .{
         .title = init_opts.title,
         .icon = init_opts.icon,
+        .size = init_opts.size,
+        .max_frames_in_flight = max_frames_in_flight,
+        .dvui_gpa = gpa,
+        .gpa = gpa,
+        .vsync = true,
     });
-
-    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{});
-
-    window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
-        .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-        .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
-        .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
-        .desired_min_image_count = max_frames_in_flight,
-        .desired_formats = &.{
-            // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
-            // TODO: add support for both linear and srgb render targets
-            // similar issue: https://github.com/ocornut/imgui/issues/578
-            .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
-            .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
-            .{ .format = .r8g8b8a8_unorm, .color_space = .srgb_nonlinear_khr },
-        },
-        .desired_present_modes = if (!init_opts.vsync) &.{.immediate_khr} else &.{.fifo_khr},
-    });
+    defer iw.deinit();
+    const b = iw.backend;
+    const window_context = iw.window;
 
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
     defer b.vkc.device.destroyRenderPass(render_pass, null);
@@ -304,7 +328,7 @@ pub fn main() !void {
     defer gpa.free(command_buffers);
 
     g_app_state = .{
-        .backend = &b,
+        .backend = b,
         .command_buffers = command_buffers,
         .render_pass = render_pass,
         .sync = sync,
@@ -427,7 +451,7 @@ pub const win = if (is_windows) struct {
         err: ?anyerror = null,
     };
 
-    pub fn initWindow(context: *WindowContext, options: InitOptions) !void {
+    pub fn initWindow(context: *WindowContext, window_class: [*:0]const u16, options: InitOptions) !void {
         const style = win32.WS_OVERLAPPEDWINDOW;
         const style_ex: win32.WINDOW_EX_STYLE = .{ .APPWINDOW = 1, .WINDOWEDGE = 1 };
 
@@ -440,7 +464,7 @@ pub const win = if (is_windows) struct {
             defer options.gpa.free(wnd_title);
             break :blk win32.CreateWindowExW(
                 style_ex,
-                options.registered_class,
+                window_class,
                 wnd_title,
                 style,
                 win32.CW_USEDEFAULT, // x
@@ -455,7 +479,7 @@ pub const win = if (is_windows) struct {
                 win32.ERROR_CANNOT_FIND_WND_CLASS => switch (builtin.mode) {
                     .Debug => std.debug.panic(
                         "did you forget to call RegisterClass? (class_name='{f}')",
-                        .{std.unicode.fmtUtf16Le(std.mem.span(options.registered_class))},
+                        .{std.unicode.fmtUtf16Le(std.mem.span(window_class))},
                     ),
                     else => unreachable,
                 },
@@ -594,11 +618,14 @@ pub const win = if (is_windows) struct {
                 _ = win32.DefWindowProcW(hwnd, umsg, wparam, lparam);
                 return 0;
             },
-            win32.WM_WINDOWPOSCHANGED, win32.WM_SIZE => {
+            win32.WM_WINDOWPOSCHANGED => return 0,
+            win32.WM_SIZE => {
                 if (contextFromHwnd(hwnd)) |ctx| {
                     const psize = win.pixelSize(hwnd);
                     ctx.last_pixel_size = .{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
                     ctx.last_window_size = win.windowSize(hwnd, psize);
+                    ctx.recreate_swapchain_requested = true;
+                    slog.debug("WM_SIZE {any}", .{psize});
                     // if (ctx.swapchain_state != null) {
                     //     if (dvui.App.get()) |app| {
                     //         paint(app, &g_app_state, ctx, 0) catch |err| {

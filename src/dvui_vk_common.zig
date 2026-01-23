@@ -250,36 +250,53 @@ pub const WindowContext = struct {
             self.framebuffers = &.{};
         }
 
-        pub fn acquireImage(
+        pub fn maybeResize(swapchain_state: *@This(), ctx: *WindowContext) !bool {
+            if (ctx.recreate_swapchain_requested) {
+                try swapchain_state.recreate(ctx);
+                ctx.recreate_swapchain_requested = false;
+                return true;
+            }
+            return false;
+        }
+
+        pub fn maybeCreateFramebuffer(
+            swapchain_state: *@This(),
+            gpa: std.mem.Allocator,
+            ctx: *WindowContext,
+            shared_attachments: []const vk.ImageView,
+            render_pass: vk.RenderPass,
+        ) !bool {
+            const vkc = ctx.backend.vkc;
+            const device = vkc.device;
+            if (swapchain_state.framebuffers.len == 0) {
+                try swapchain_state.createFramebuffers(
+                    gpa,
+                    device,
+                    shared_attachments,
+                    render_pass,
+                );
+                return true;
+            }
+            return false;
+        }
+
+        pub fn acquireImageMaybeRecreate(
             swapchain_state: *@This(),
             gpa: std.mem.Allocator,
             ctx: *WindowContext,
             sync: FrameSync,
-            shared_attachments: []const vk.ImageView,
-            render_pass: vk.RenderPass,
+            shared_attachments: []const vk.ImageView, // for framebuffer recreate
+            render_pass: vk.RenderPass, // for framebuffer recreate
         ) !u32 {
             const vkc = ctx.backend.vkc;
             const device = vkc.device;
             const image_index = blk: while (true) {
-                if (swapchain_state.framebuffers.len == 0) {
-                    swapchain_state.framebuffers = try createFramebuffers(
-                        gpa,
-                        device,
-                        swapchain_state.swapchain.extent,
-                        swapchain_state.swapchain.image_count,
-                        swapchain_state.image_views,
-                        shared_attachments,
-                        render_pass,
-                    );
-                }
-                if (ctx.recreate_swapchain_requested) {
-                    try swapchain_state.recreate(ctx);
-                    ctx.recreate_swapchain_requested = false;
-                    continue;
-                }
+                _ = try swapchain_state.maybeResize(ctx);
+                _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
+
                 const next_image_result = device.acquireNextImageKHR(
                     ctx.swapchain_state.?.swapchain.handle,
-                    std.time.ns_per_ms * 100,
+                    std.math.maxInt(u64),
                     sync.imageAvailableSemaphore(),
                     .null_handle,
                 ) catch |err| {
@@ -301,6 +318,47 @@ pub const WindowContext = struct {
                 break :blk next_image_result.image_index;
             };
             return image_index; // autofix
+        }
+
+        fn createFramebuffers(
+            swapchain_state: *@This(),
+            allocator: std.mem.Allocator,
+            device: vk.DeviceProxy,
+            shared_attachments: []const vk.ImageView,
+            render_pass: vk.RenderPass,
+        ) !void {
+            const vk_alloc = null;
+            for (swapchain_state.framebuffers) |fb| device.destroyFramebuffer(fb, vk_alloc);
+            const extent: vk.Extent2D = swapchain_state.swapchain.extent;
+            const image_count: u32 = swapchain_state.swapchain.image_count;
+            const image_views: []const vk.ImageView = swapchain_state.image_views;
+            var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
+            errdefer {
+                for (framebuffers.items) |framebuffer| {
+                    device.destroyFramebuffer(framebuffer, vk_alloc);
+                }
+                framebuffers.deinit(allocator);
+            }
+
+            for (0..image_count) |i| {
+                var attachments = [1]vk.ImageView{.null_handle} ** 8;
+                attachments[0] = image_views[i];
+                std.debug.assert(shared_attachments.len < 7);
+                for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
+                const framebuffer_info = vk.FramebufferCreateInfo{
+                    .render_pass = render_pass,
+                    .attachment_count = @intCast(1 + shared_attachments.len),
+                    .p_attachments = &attachments,
+                    .width = extent.width,
+                    .height = extent.height,
+                    .layers = 1,
+                };
+
+                const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
+                framebuffers.appendAssumeCapacity(framebuffer);
+            }
+
+            swapchain_state.framebuffers = framebuffers.items;
         }
     };
 
@@ -403,44 +461,6 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
     };
 
     return device.createRenderPass(&renderpass_info, null);
-}
-
-pub fn createFramebuffers(
-    allocator: std.mem.Allocator,
-    device: vk.DeviceProxy,
-    extent: vk.Extent2D,
-    image_count: u32,
-    image_views: []const vk.ImageView,
-    shared_attachments: []const vk.ImageView,
-    render_pass: vk.RenderPass,
-) ![]vk.Framebuffer {
-    var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
-    errdefer {
-        for (framebuffers.items) |framebuffer| {
-            device.destroyFramebuffer(framebuffer, null);
-        }
-        framebuffers.deinit(allocator);
-    }
-
-    for (0..image_count) |i| {
-        var attachments = [1]vk.ImageView{.null_handle} ** 8;
-        attachments[0] = image_views[i];
-        std.debug.assert(shared_attachments.len < 7);
-        for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
-        const framebuffer_info = vk.FramebufferCreateInfo{
-            .render_pass = render_pass,
-            .attachment_count = @intCast(1 + shared_attachments.len),
-            .p_attachments = &attachments,
-            .width = extent.width,
-            .height = extent.height,
-            .layers = 1,
-        };
-
-        const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
-        framebuffers.appendAssumeCapacity(framebuffer);
-    }
-
-    return framebuffers.items;
 }
 
 pub fn destroyFramebuffers(allocator: std.mem.Allocator, device: vk.DeviceProxy, framebuffers: []const vk.Framebuffer) void {
@@ -553,7 +573,7 @@ pub fn createCommandBuffers(
 }
 
 pub fn present(
-    ctx: *const WindowContext,
+    ctx: *WindowContext,
     command_buffer: vk.CommandBuffer,
     sync: FrameSync.Frame,
     swapchain: vk.SwapchainKHR,
@@ -596,11 +616,11 @@ pub fn present(
         }
         return err;
     };
-
-    if (present_result == .suboptimal_khr) {
-        return false;
+    switch (present_result) {
+        .success => {},
+        .suboptimal_khr => ctx.recreate_swapchain_requested = true,
+        else => |other| slog.debug("presentKHR result: {}", .{other}),
     }
-
     return true;
 }
 
@@ -626,7 +646,7 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     // wait for previous frame to finish
     try app_state.sync.begin(device);
     defer app_state.sync.end();
-    const image_index = try ctx.swapchain_state.?.acquireImage(gpa, ctx, app_state.sync, &.{}, render_pass);
+    const image_index = try ctx.swapchain_state.?.acquireImageMaybeRecreate(gpa, ctx, app_state.sync, &.{}, render_pass);
 
     const command_buffer = app_state.command_buffers[app_state.sync.current_frame];
     const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
