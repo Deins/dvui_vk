@@ -1,7 +1,7 @@
 .{
     .name = .dvui_vk,
     .version = "0.0.0",
-    .minimum_zig_version = "0.15.1", // tested on 0.15.2
+    .minimum_zig_version = "0.15.2",
     .fingerprint = 0x8c17814f9967671d,
     .dependencies = .{
         .dvui = .{
@@ -35,8 +35,15 @@
         },
         .glfw_build = .{
             // .path = "glfw.zig",
-            .url = "git+https://github.com/tiawl/glfw.zig#e6bc791383cd1c8f79b77e1e4d0aba8f6918e134",
-            .hash = "glfw_zig-1.0.0-NrvYo-bXGQDRGXxwfZCFSvL_nPm17sAvkBDU1PvFbVLS",
+            .url = "git+https://github.com/tiawl/glfw.zig#2815c42d2a0a7e7936bc2094b0547e53ec2b484d",
+            .hash = "glfw_zig-1.0.0-NrvYo-bXGQBIe3316R8aIKJrwvQvdeIet-hYcINGNa5g",
+            .lazy = true,
+        },
+
+        // optional: to more easily  without vulkan_sdk
+        .vulkan_headers = .{
+            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",
+            .hash = "N-V-__8AAB3SBAKySRcX3yPGLhjKZreuo_mCzCTRBgkE1e-v",
             .lazy = true,
         },
 
