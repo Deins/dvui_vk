@@ -40,7 +40,7 @@
             .lazy = true,
         },
 
-        // optional: to more easily  without vulkan_sdk
+        // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",
             .hash = "N-V-__8AAB3SBAKySRcX3yPGLhjKZreuo_mCzCTRBgkE1e-v",
