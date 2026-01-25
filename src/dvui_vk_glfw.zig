@@ -348,6 +348,11 @@ pub fn main() !void {
     registerDvuiIO(window_context.glfw_win.?);
 
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
+    //extern fn glfwSetWindowRefreshCallback(window: ?*Window, callback: WindowRefreshFun) WindowRefreshFun;
+    if (builtin.os.tag == .windows) { // windows blocks event loop while resizing, use separate callback to keep rendering
+        _ = glfw.setWindowRefreshCallback(window, &refreshCB);
+    }
+
     while (!glfw.windowShouldClose(window)) {
         if (glfw.getKey(window, glfw.KeyEscape) == glfw.Press) {
             glfw.setWindowShouldClose(window, true);
@@ -362,6 +367,14 @@ pub fn main() !void {
 
         glfw.pollEvents();
     }
+}
+
+/// Window damage and refresh
+pub fn refreshCB(window: *glfw.Window) callconv(.c) void {
+    const ctx = glfwWindowContext(window);
+    if (dvui.App.get()) |app| {
+        paint(app, &g_app_state, ctx) catch |err| slog.debug("paint on refresh failed: {}", .{err});
+    } else slog.debug("Can't refresh - missing dvui.getApp()", .{});
 }
 
 pub fn resizeCB(window: *glfw.Window, w: c_int, h: c_int) callconv(.c) void {
