@@ -1,0 +1,34 @@
+name: Build
+run-name: Build
+on:
+  push:
+  pull_request:
+
+jobs:
+  compile-glfw:
+    name: Build ${{ matrix.os }} glfw
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v3
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: 0.15.2
+      - name: Build with GLFW
+        run: |
+          zig build -Dglfw
+          
+  build-windows-native:
+    runs-on: windows-latest
+    name: Build windows native
+    steps:
+      - uses: actions/checkout@v3
+      - uses: mlugg/setup-zig@v2.0.5
+        with:
+          version: 0.15.2
+      - name: Build
+        run: |
+          zig build
+
