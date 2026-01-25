@@ -23,16 +23,24 @@ pub fn build(b: *Build) !void {
 
     // Vulkan
     const vk_registry_opt = b.option([]const u8, "vk_registry", "Path to vulkan registry vk.xml");
-    const vk_registry = vk_registry_opt orelse blk: {
+    const vk_registry: Build.LazyPath = if (vk_registry_opt) |ps| Build.LazyPath{ .cwd_relative = ps } else blk: {
         const env = std.process.getEnvMap(b.allocator) catch unreachable;
         if (env.get("VULKAN_SDK")) |vk_path| {
-            break :blk b.pathJoin(&.{ vk_path, "share", "vulkan", "registry", "vk.xml" });
+            break :blk Build.LazyPath{ .cwd_relative = b.pathJoin(&.{ vk_path, "share", "vulkan", "registry", "vk.xml" }) };
         }
-        std.log.err("VULKAN_SDK not found. Pass in -Dvk_registry=/path/to/vk.xml or install vulkan SDK.", .{});
-        break :blk "/usr/share/vulkan/registry/vk.xml"; // best guess
+
+        // fallback to registry from lazy dependency
+        const vk_headers = b.lazyDependency("vulkan_headers", .{});
+        if (vk_headers) |h| {
+            std.log.info("VulkanSDK not found - falling back to vulkan_headers dependency", .{});
+            break :blk h.path("registry/vk.xml");
+        } else return;
+
+        // std.log.err("VULKAN_SDK not found. Pass in -Dvk_registry=/path/to/vk.xml or install vulkan SDK.", .{});
+        // break :blk "/usr/share/vulkan/registry/vk.xml"; // best guess
     };
     const vkzig_dep = dvui_vk_dep.builder.dependency("vulkan", .{
-        .registry = @as([]const u8, vk_registry),
+        .registry = vk_registry,
     });
 
     const dvui_dep = dvui_vk_dep.builder.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom });

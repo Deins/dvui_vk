@@ -39,7 +39,7 @@ pub fn build(b: *Build) !void {
         // fallback to registry from lazy dependency
         const vk_headers = b.lazyDependency("vulkan_headers", .{});
         if (vk_headers) |h| {
-            std.log.info("Using VulkanSDK from vulkan_headers dependancy", .{});
+            std.log.info("VulkanSDK not found - falling back to vulkan_headers dependency", .{});
             break :blk h.path("registry/vk.xml");
         } else return;
 

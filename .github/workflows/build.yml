@@ -31,4 +31,5 @@ jobs:
       - name: Build
         run: |
           zig build
+          zig build --build-file ./examples/3d/build.zig
 
