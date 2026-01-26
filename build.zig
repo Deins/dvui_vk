@@ -61,13 +61,6 @@ pub fn build(b: *Build) !void {
     const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse false;
     const glfw = if (glfw_on) b.lazyDependency("glfw", .{}) else null;
     const glfw_build = if (glfw_on) b.lazyDependency("glfw_build", .{}) else null;
-    // if (glfw_build) |gb| {
-    //     // this probably is dumb, but lets try to make zig build use same vulkan dependency
-    //     gb.builder.dependency("vulkan_zig", .{
-    //         .target = target,
-    //         .optimize = optimize,
-    //     }).* = vkzig_dep.*;
-    // }
 
     // ZTracy
     const ztracy =

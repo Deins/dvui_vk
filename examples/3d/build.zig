@@ -16,9 +16,11 @@ pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse false;
     const dvui_vk_dep = b.dependency("dvui_vk", .{
         .target = target,
         .optimize = optimize,
+        .glfw = glfw_on,
     });
 
     // Vulkan
@@ -30,7 +32,7 @@ pub fn build(b: *Build) !void {
         }
 
         // fallback to registry from lazy dependency
-        const vk_headers = b.lazyDependency("vulkan_headers", .{});
+        const vk_headers = dvui_vk_dep.builder.lazyDependency("vulkan_headers", .{});
         if (vk_headers) |h| {
             std.log.info("VulkanSDK not found - falling back to vulkan_headers dependency", .{});
             break :blk h.path("registry/vk.xml");

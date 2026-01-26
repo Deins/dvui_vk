@@ -132,6 +132,7 @@ pub fn createVkSurfaceWin32(self: *WindowContext, vk_instance: vk.InstanceProxy)
     };
     return true;
 }
+pub const createVkSurface = createVkSurfaceWin32;
 
 //
 //   Dvui backend implementation

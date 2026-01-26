@@ -8,6 +8,7 @@ const slog = std.log.scoped(.dvui_vk_common);
 
 pub const CreateSurfaceCallback = *const fn (window_context: *WindowContext, instance: vk.InstanceProxy) bool;
 
+/// global vulkan context
 pub const VkContext = struct {
     alloc: ?*vk.AllocationCallbacks = null,
     instance: vk.InstanceProxy,

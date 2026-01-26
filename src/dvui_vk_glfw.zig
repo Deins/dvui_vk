@@ -68,6 +68,7 @@ pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) 
     const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, vk_alloc, @ptrCast(&self.surface));
     return res == .success;
 }
+pub const createVkSurface = createVkSurfaceGLFW;
 
 //
 //   Dvui backend implementation

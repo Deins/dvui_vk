@@ -6,9 +6,13 @@ const vk = @import("vulkan");
 const zm = @import("zmath");
 
 const DvuiVkBackend = dvui.backend;
-const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else void;
-const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
-const vk_dll = DvuiVkBackend.vk_dll;
+const uses_win32 = builtin.target.os.tag == .windows and @hasDecl(DvuiVkBackend, "win32");
+const win32 = if (uses_win32) DvuiVkBackend.win32 else void;
+const win = if (uses_win32) DvuiVkBackend.win else void;
+const uses_vk_dll = @hasDecl(DvuiVkBackend, "vk_dll");
+const vk_dll = if (uses_vk_dll) DvuiVkBackend.vk_dll else void;
+const uses_glfw = @hasDecl(DvuiVkBackend, "glfw");
+const glfw = if (uses_glfw) DvuiVkBackend.glfw else void;
 const FrameSync = DvuiVkBackend.FrameSync;
 const slog = std.log.scoped(.main);
 
@@ -89,15 +93,18 @@ pub const AppState = struct {
     depth_buffer: DepthBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
-        const window_class = win32.L("DvuiWindow");
-        win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-            "RegisterClass",
-            win32.GetLastError(),
-        );
+        const window_class = if (uses_win32) win32.L("DvuiWindow") else void;
+        if (uses_win32) {
+            win.RegisterClass(window_class, .{}) catch win32.panicWin32(
+                "RegisterClass",
+                win32.GetLastError(),
+            );
+        }
 
-        vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
-        errdefer vk_dll.deinit();
-        const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
+        if (uses_vk_dll) vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
+        errdefer if (uses_vk_dll) vk_dll.deinit();
+
+        const loader = if (uses_vk_dll) vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}") else DvuiVkBackend.getInstanceProcAddress;
 
         var b = try gpa.create(DvuiVkBackend.VkBackend);
         b.* = DvuiVkBackend.VkBackend.init(gpa, undefined);
@@ -110,17 +117,31 @@ pub const AppState = struct {
             .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
             .hwnd = undefined,
         };
-        try win.initWindow(window_context, window_class, .{
-            .dvui_gpa = gpa,
-            .gpa = gpa,
-            .title = "3d example",
-            .vsync = false,
-        });
+        if (uses_win32) {
+            win.initWindow(window_context, window_class, .{
+                .dvui_gpa = gpa,
+                .gpa = gpa,
+                .title = "3d example",
+                .vsync = false,
+            }) catch |err| {
+                slog.err("initWindow failed: {}", .{err});
+                return err;
+            };
+        } else if (uses_glfw) {
+            DvuiVkBackend.initWindow(window_context, .{
+                .dvui_gpa = gpa,
+                .gpa = gpa,
+                .title = "3d example",
+            }) catch |err| {
+                slog.err("initWindow failed: {}", .{err});
+                return err;
+            };
+        } else @compileError("Platform not implemented!");
 
         var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
             .extended_dynamic_state = .true,
         };
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurfaceWin32, .{
+        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurface, .{
             .device_select_settings = .{
                 .required_extensions = &.{
                     vk.extensions.khr_swapchain.name,
@@ -192,7 +213,7 @@ pub const AppState = struct {
     }
 
     pub fn deinit(self: AppState, gpa: std.mem.Allocator) void {
-        defer vk_dll.deinit();
+        defer if (uses_vk_dll) vk_dll.deinit();
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
         defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
@@ -423,6 +444,16 @@ pub fn main() !void {
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
+    if (uses_glfw) {
+        try glfw.init();
+        var major: i32 = 0;
+        var minor: i32 = 0;
+        var rev: i32 = 0;
+        glfw.getVersion(&major, &minor, &rev);
+        slog.info("GLFW {}.{}.{} vk_support: {}", .{ major, minor, rev, glfw.vulkanSupported() });
+    }
+    defer if (uses_glfw) glfw.terminate();
+
     g_app_state = try AppState.init(gpa);
     defer g_app_state.deinit(gpa);
 
@@ -434,22 +465,42 @@ pub fn main() !void {
     g_app_state.backend.renderer.?.pipeline = try createDvuiPipeline(g_app_state.device(), g_app_state.backend.renderer.?.pipeline_layout, g_app_state.render_pass, g_app_state.backend.renderer.?.vk_alloc);
 
     defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
-    main_loop: while (g_app_state.backend.contexts.items.len > 0) {
-        // slog.info("frame: {}", .{current_frame_in_flight});
-        switch (win.serviceMessageQueue()) {
-            .queue_empty => {
-                for (g_app_state.backend.contexts.items) |ctx| {
-                    try paint(&g_app_state, ctx);
-                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
-                    if (ctx.received_close) {
-                        _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
-                        continue;
+
+    if (uses_win32) {
+        main_loop: while (g_app_state.backend.contexts.items.len > 0) {
+            // slog.info("frame: {}", .{current_frame_in_flight});
+            switch (win.serviceMessageQueue()) {
+                .queue_empty => {
+                    for (g_app_state.backend.contexts.items) |ctx| {
+                        try paint(&g_app_state, ctx);
+                        g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
+                        if (ctx.received_close) {
+                            _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
+                            continue;
+                        }
                     }
-                }
-            },
-            .quit => break :main_loop,
+                },
+                .quit => break :main_loop,
+            }
         }
-    }
+    } else if (uses_glfw) {
+        const b = g_app_state.backend;
+        const window = b.contexts.items[0].glfw_win;
+        while (!glfw.windowShouldClose(window)) {
+            if (glfw.getKey(window, glfw.KeyEscape) == glfw.Press) {
+                glfw.setWindowShouldClose(window, true);
+            }
+
+            // TODO: fixme: implement actual multi-window implementation, this won't work right
+            for (b.contexts.items, 0..) |ctx, ctx_i| {
+                _ = ctx_i; // autofix
+                try paint(&g_app_state, ctx);
+                b.prev_frame_stats = b.renderer.?.stats;
+            }
+
+            glfw.pollEvents();
+        }
+    } else @compileError("Platform not implemented!");
 }
 
 pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {

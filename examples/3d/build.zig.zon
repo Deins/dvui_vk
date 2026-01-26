@@ -15,13 +15,6 @@
             .url = "git+https://github.com/zig-gamedev/zmath.git#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
             .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
         },
-
-        // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
-        .vulkan_headers = .{
-            .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",
-            .hash = "N-V-__8AAB3SBAKySRcX3yPGLhjKZreuo_mCzCTRBgkE1e-v",
-            .lazy = true,
-        },
     },
     .paths = .{""},
 }

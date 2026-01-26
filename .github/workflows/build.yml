@@ -18,7 +18,12 @@ jobs:
           version: 0.15.2
       - name: Build with GLFW
         run: |
+          echo "zig build..."
           zig build -Dglfw
+          echo "zig build 3d example..."
+          zig build --build-file ./examples/3d/build.zig
+          echo "artifacts:"
+          ls zig-out
           
   build-windows-native:
     runs-on: windows-latest
@@ -30,6 +35,9 @@ jobs:
           version: 0.15.2
       - name: Build
         run: |
+          echo "zig build..."
           zig build
+          echo "zig build 3d example..."
           zig build --build-file ./examples/3d/build.zig
+          
 

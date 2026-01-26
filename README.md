@@ -5,7 +5,7 @@ Targeting `vulkan 1.2` an newer and `zig v0.15.2` (see tags for older ver)
 ### Current platform support
 * Windows native [![Windows Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20windows%20native)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 * Through use of GLFW library for windowing. Uses build flag `-Dglfw`.  
-Only app example implemented at the moment.
+Standalone example not implemented at the moment. 
     * Windows GLFW [![Windows GLFW Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20windows-latest%20glfw)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
     * Linux GLFW [![Ubuntu GLFW Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20ubuntu-latest%20glfw)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml) 
 
@@ -29,26 +29,20 @@ Backend is separated in parts:
     * windows: app swapchain resize is not synced to window resize causing small visual jerks. (no easy fix - general issue with vulkan on windows, maybe some hackery is possible to use dx11/12 swapchain instead of vulkan one). standalone example: doesn't have realtime resize implemented.
 
 ## Build & Run
-### With vulkan sdk (recommended)
-With Vulkan SDK installed and sourced:
+Vulkan SDK is recommended for development to be able to run validation layers etc. However it is not required and will still compile with compilation message `VulkanSDK not found`.
+If its unexpected check that `VULKAN_SDK` is correctly defined in your environment.
+
 ```sh
-zig build run -Doptimize=ReleaseFast
+zig build run-app -Doptimize=ReleaseFast -Dglfw
 ```
 
 Shaders when modified can be recompiled by passing `-Dslangc` or `-Dglslc` depending on what shader language is used.
 
-### Without vulkan sdk
-Get vk.xml form somewhere such as [vulkan-headers](https://github.com/KhronosGroup/Vulkan-Headers/blob/main/registry/vk.xml). Pass it in arguments:
-```sh
-zig build run -Dvk_registry=/path/to/vk.xml -Doptimize=ReleaseFast
-```
-
-### App example
-Similarly only target `run-app` instead of `run`
-For glfw backend add flag `-Dglfw`
+### Standalone example
+Similarly only `run` instead of `run-app`. And skip `-Dglfw`. Windows only, glfw not implemented. See 3d example (idea the same).
 
 ### Standalone with vulkan 3D rendering
-`zig build run --build-file ./examples/3d/build.zig`  
-Or alternatively `cd examples/3d` and `zig build run`.
+`zig build run --build-file ./examples/3d/build.zig -Dglfw`  
+Or alternatively `cd examples/3d` and `zig build run -Dglfw`.
 
 ![screenshot](examples/3d/screenshot.png)
