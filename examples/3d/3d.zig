@@ -467,6 +467,7 @@ pub fn main() !void {
     defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
     if (uses_win32) {
+        DvuiVkBackend.windowDamageRefreshCallback = &win32DamageRefresh;
         main_loop: while (g_app_state.backend.contexts.items.len > 0) {
             // slog.info("frame: {}", .{current_frame_in_flight});
             switch (win.serviceMessageQueue()) {
@@ -513,6 +514,9 @@ pub fn refreshCB(window: *glfw.Window) callconv(.c) void {
         const ctx: *DvuiVkBackend.WindowContext = @ptrCast(@alignCast(glfw.getWindowUserPointer(window)));
         paint(&g_app_state, ctx) catch {};
     }
+}
+pub fn win32DamageRefresh(ctx: *DvuiVkBackend.WindowContext) void {
+    paint(&g_app_state, ctx) catch {};
 }
 
 pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {

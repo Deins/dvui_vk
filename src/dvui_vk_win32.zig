@@ -80,6 +80,8 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     return .{ .backend = b, .window = window_context };
 }
 
+pub var windowDamageRefreshCallback: ?*const fn (win: *WindowContext) void = null;
+
 pub const vk = @import("vk");
 pub const dvui_vk_common = @import("dvui_vk_common.zig");
 pub const VkContext = dvui_vk_common.VkContext;
@@ -353,6 +355,7 @@ pub fn main() !void {
     });
 
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
+    windowDamageRefreshCallback = &windowDamageRefresh;
     main_loop: while (b.contexts.items.len > 0) {
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
@@ -369,6 +372,13 @@ pub fn main() !void {
             .quit => break :main_loop,
         }
     }
+}
+
+fn windowDamageRefresh(ctx: *WindowContext) void {
+    slog.debug("out of main loop paint", .{});
+    if (dvui.App.get()) |app| {
+        paint(app, &g_app_state, ctx) catch |err| slog.debug("on resize paint failed {}", .{err});
+    } else slog.debug("windowDamageRefresh - can't get app", .{});
 }
 
 pub const win = if (is_windows) struct {
@@ -619,30 +629,22 @@ pub const win = if (is_windows) struct {
                 _ = win32.DefWindowProcW(hwnd, umsg, wparam, lparam);
                 return 0;
             },
-            win32.WM_WINDOWPOSCHANGED, win32.WM_SIZE => {
+            win32.WM_WINDOWPOSCHANGED, win32.WM_SIZE => { // wm size doesn't trigger, pos-changed therefore must be used
                 if (contextFromHwnd(hwnd)) |ctx| {
                     const psize = win.pixelSize(hwnd);
-                    ctx.last_pixel_size = .{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
+                    const dsize = dvui.Size.Physical{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
+                    if (dsize.w == ctx.last_pixel_size.w and dsize.h != ctx.last_pixel_size.h) {
+                        return 0; // no actual size difference
+                    }
+                    ctx.last_pixel_size = dsize;
                     ctx.last_window_size = win.windowSize(hwnd, psize);
                     ctx.recreate_swapchain_requested = true;
                     slog.debug("WM_SIZE {any}", .{psize});
-                    // if (ctx.swapchain_state != null) {
-                    //     if (dvui.App.get()) |app| {
-                    //         paint(app, &g_app_state, ctx, 0) catch |err| {
-                    //             ctx.received_close = true;
-                    //             slog.warn("paint error during resize: {}", .{err});
-                    //         };
-                    //     }
-                    // }
+                    if (windowDamageRefreshCallback) |cb| cb(ctx);
                 } else slog.warn("WM_SIZE: missing hwnd", .{});
-                // if (contextFromHwnd(hwnd)) |ctx| {
-                //     slog.info("WM_SIZE", .{});
-                //     if (ctx.swapchain_state) |*s| {
-                //         s.recreate(ctx) catch unreachable;
-                //     }
-                // }
                 return 0;
             },
+
             else => return win32.DefWindowProcW(hwnd, umsg, wparam, lparam),
         }
     }
