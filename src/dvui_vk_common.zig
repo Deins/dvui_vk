@@ -27,10 +27,14 @@ pub const VkContext = struct {
     pub const Options = struct {
         instance_settings: vkk.instance.CreateSettings = .{
             .required_api_version = vk.API_VERSION_1_2,
+            // .enable_validation = true,
         },
-        device_select_settings: vkk.PhysicalDevice.SelectSettings = .{ .required_api_version = vk.API_VERSION_1_2, .required_extensions = &.{
-            vk.extensions.khr_swapchain.name,
-        } },
+        device_select_settings: vkk.PhysicalDevice.SelectSettings = .{
+            .required_api_version = vk.API_VERSION_1_2,
+            .required_extensions = &.{
+                vk.extensions.khr_swapchain.name,
+            },
+        },
         /// use to attach extension feature bits etc. to VkDeviceCreateInfo chain
         device_create_info_p_next: ?*anyopaque = null,
     };
@@ -42,12 +46,22 @@ pub const VkContext = struct {
         createSurface: CreateSurfaceCallback,
         opt: Options,
     ) !VkContext {
-        const instance = try vkk.instance.create(
+        const instance = vkk.instance.create(
             allocator,
             loader,
             opt.instance_settings,
             null,
-        );
+        ) catch blk: {
+            slog.err("Failed to get instance! Retrying without validation", .{});
+            var instance_settings = opt.instance_settings;
+            instance_settings.enable_validation = false;
+            break :blk try vkk.instance.create(
+                allocator,
+                loader,
+                instance_settings,
+                null,
+            );
+        };
         errdefer instance.destroyInstance(null);
 
         // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);

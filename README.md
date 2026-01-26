@@ -1,13 +1,16 @@
-# Vulkan Backend for dvui
+# Vulkan Backend for dvui 
+[![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
+
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
 Targeting `vulkan 1.2` an newer and `zig v0.15.2` (see tags for older ver)
 
 ### Current platform support
-* Windows native [![Windows Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20windows%20native)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
-* Through use of GLFW library for windowing. Uses build flag `-Dglfw`.  
+
+* **Windows** native
+* Using GLFW library. Build with flag `-Dglfw`.  
 Standalone example not implemented at the moment. 
-    * Windows GLFW [![Windows GLFW Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20windows-latest%20glfw)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
-    * Linux GLFW [![Ubuntu GLFW Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg?job=Build%20ubuntu-latest%20glfw)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml) 
+    * **Windows** GLFW
+    * **Linux** GLFW 
 
 Backend is separated in parts:
 * [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc. Only dependency: [vulkan_zig](https://github.com/Snektron/vulkan-zig)

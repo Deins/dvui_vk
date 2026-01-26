@@ -21,9 +21,8 @@ jobs:
           echo "zig build..."
           zig build -Dglfw
           echo "zig build 3d example..."
-          zig build --build-file ./examples/3d/build.zig
-          echo "artifacts:"
-          ls zig-out
+          zig build --build-file ./examples/3d/build.zig -Dglfw
+          ls zig-out/bin
           
   build-windows-native:
     runs-on: windows-latest
@@ -39,5 +38,6 @@ jobs:
           zig build
           echo "zig build 3d example..."
           zig build --build-file ./examples/3d/build.zig
+          ls zig-out/bin
           
 

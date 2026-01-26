@@ -192,7 +192,7 @@ pub const ShaderCompileOptions = struct {
 pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderCompileOptions) std.ArrayList(Shader) {
     var shaders: std.ArrayList(Shader) = .{};
     const cwd = b.build_root.handle;
-    const dir = cwd.openDir(shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}'' from '{s}'", .{ shader_subpath, cwd.realpathAlloc(b.allocator, "") catch unreachable });
+    const dir = cwd.openDir(shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}' from '{s}'", .{ shader_subpath, cwd.realpathAlloc(b.allocator, "") catch "OOM" });
     const dbg_print = false;
     if (dbg_print) { // debug print dir
         var dir_path_buf: [256]u8 = undefined;

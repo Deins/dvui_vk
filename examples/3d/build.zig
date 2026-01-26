@@ -72,7 +72,7 @@ pub fn build(b: *Build) !void {
 
     { // Shaders
         const slangc = b.option(bool, "slangc", "Compile slang shaders") orelse false;
-        const shaders = dvui_vk.compileShaders(b, "", .{ .slang = if (slangc) .{} else null, .optimize = optimize != .Debug });
+        const shaders = dvui_vk.compileShaders(b, ".", .{ .slang = if (slangc) .{} else null, .optimize = optimize != .Debug });
         for (shaders.items) |shader| {
             exe_standalone.root_module.addAnonymousImport(shader.name, .{
                 .root_source_file = shader.path,
