@@ -486,6 +486,7 @@ pub fn main() !void {
     } else if (uses_glfw) {
         const b = g_app_state.backend;
         const window = b.contexts.items[0].glfw_win;
+        DvuiVkBackend.registerDvuiIO(window.?); // registers glfw callbacks
         while (!glfw.windowShouldClose(window)) {
             if (glfw.getKey(window, glfw.KeyEscape) == glfw.Press) {
                 glfw.setWindowShouldClose(window, true);
