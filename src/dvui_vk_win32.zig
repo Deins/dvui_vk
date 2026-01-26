@@ -619,8 +619,7 @@ pub const win = if (is_windows) struct {
                 _ = win32.DefWindowProcW(hwnd, umsg, wparam, lparam);
                 return 0;
             },
-            win32.WM_WINDOWPOSCHANGED => return 0,
-            win32.WM_SIZE => {
+            win32.WM_WINDOWPOSCHANGED, win32.WM_SIZE => {
                 if (contextFromHwnd(hwnd)) |ctx| {
                     const psize = win.pixelSize(hwnd);
                     ctx.last_pixel_size = .{ .w = @floatFromInt(psize[0]), .h = @floatFromInt(psize[1]) };
@@ -635,7 +634,7 @@ pub const win = if (is_windows) struct {
                     //         };
                     //     }
                     // }
-                }
+                } else slog.warn("WM_SIZE: missing hwnd", .{});
                 // if (contextFromHwnd(hwnd)) |ctx| {
                 //     slog.info("WM_SIZE", .{});
                 //     if (ctx.swapchain_state) |*s| {
