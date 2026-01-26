@@ -39,7 +39,7 @@ If its unexpected check that `VULKAN_SDK` is correctly defined in your environme
 zig build run-app -Doptimize=ReleaseFast -Dglfw
 ```
 
-Shaders when modified can be recompiled by passing `-Dslangc` or `-Dglslc` depending on what shader language is used.
+Shaders when modified can be recompiled by passing `-Dslangc` ([slangc](https://github.com/shader-slang/slang/releases) comes packaged with vulkan SDK or needs to be installed manually).
 
 ### Standalone example
 Similarly only `run` instead of `run-app`. And skip `-Dglfw`. Windows only, glfw not implemented. See 3d example (idea the same).
