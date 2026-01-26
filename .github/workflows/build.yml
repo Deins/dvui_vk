@@ -12,32 +12,26 @@ jobs:
         os: [windows-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2.0.5
         with:
           version: 0.15.2
       - name: Build with GLFW
         run: |
-          echo "zig build..."
           zig build -Dglfw
-          echo "zig build 3d example..."
           zig build --build-file ./examples/3d/build.zig -Dglfw
-          ls zig-out/bin
           
   build-windows-native:
     runs-on: windows-latest
     name: Build windows native
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2.0.5
         with:
           version: 0.15.2
       - name: Build
         run: |
-          echo "zig build..."
           zig build
-          echo "zig build 3d example..."
           zig build --build-file ./examples/3d/build.zig
-          ls zig-out/bin
           
 
