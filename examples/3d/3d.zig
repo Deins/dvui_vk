@@ -433,7 +433,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
     return device.createRenderPass(&renderpass_info, null);
 }
 
-pub const max_frames_in_flight = 3;
+pub const max_frames_in_flight = 2;
 pub const vsync = false;
 
 pub fn main() !void {

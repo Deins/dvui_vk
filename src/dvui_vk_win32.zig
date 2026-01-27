@@ -80,6 +80,7 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     return .{ .backend = b, .window = window_context };
 }
 
+pub var g_window_resizing = std.atomic.Value(bool).init(false);
 pub var windowDamageRefreshCallback: ?*const fn (win: *WindowContext) void = null;
 
 pub const vk = @import("vk");
@@ -375,7 +376,6 @@ pub fn main() !void {
 }
 
 fn windowDamageRefresh(ctx: *WindowContext) void {
-    slog.debug("out of main loop paint", .{});
     if (dvui.App.get()) |app| {
         paint(app, &g_app_state, ctx) catch |err| slog.debug("on resize paint failed {}", .{err});
     } else slog.debug("windowDamageRefresh - can't get app", .{});
@@ -410,7 +410,7 @@ pub const win = if (is_windows) struct {
 
     pub const RegisterClassOptions = struct {
         /// styles in addition to DBLCLICKS
-        style: win32.WNDCLASS_STYLES = .{},
+        style: win32.WNDCLASS_STYLES = .{ .HREDRAW = 1, .VREDRAW = 1 },
         // NOTE: we could allow the user to provide their own wndproc which we could
         //       call before or after ours
         //wndproc: ...,
@@ -619,16 +619,28 @@ pub const win = if (is_windows) struct {
                 }
                 return 0;
             },
-            // win32.WM_PAINT => {
-            //     var ps: win32.PAINTSTRUCT = undefined;
-            //     if (win32.BeginPaint(hwnd, &ps) == null) lastErr("BeginPaint") catch return -1;
-            //     boolToErr(win32.EndPaint(hwnd, &ps), "EndPaint") catch return -1;
-            //     return 0;
-            // },
             win32.WM_CLOSE => {
                 _ = win32.DefWindowProcW(hwnd, umsg, wparam, lparam);
                 return 0;
             },
+            win32.WM_PAINT => {
+                var ps: win32.PAINTSTRUCT = undefined;
+                if (contextFromHwnd(hwnd)) |ctx|
+                    if (g_window_resizing.load(.acquire)) {
+                        if (windowDamageRefreshCallback) |cb| {
+                            _ = win32.BeginPaint(hwnd, &ps);
+                            cb(ctx);
+                            _ = win32.EndPaint(hwnd, &ps);
+                            // invalidate rect to force wm_paint to trigger even when window is not resized - mouse is held down not moved
+                            _ = win32.InvalidateRect(hwnd, null, 0);
+                            return 0;
+                        }
+                    };
+
+                _ = win32.DefWindowProcW(hwnd, umsg, wparam, lparam);
+                return 0;
+            },
+
             win32.WM_WINDOWPOSCHANGED, win32.WM_SIZE => { // wm size doesn't trigger, pos-changed therefore must be used
                 if (contextFromHwnd(hwnd)) |ctx| {
                     const psize = win.pixelSize(hwnd);
@@ -636,12 +648,28 @@ pub const win = if (is_windows) struct {
                     if (dsize.w == ctx.last_pixel_size.w and dsize.h != ctx.last_pixel_size.h) {
                         return 0; // no actual size difference
                     }
+                    // slog.debug("WM_SIZE {any}", .{psize});
                     ctx.last_pixel_size = dsize;
                     ctx.last_window_size = win.windowSize(hwnd, psize);
                     ctx.recreate_swapchain_requested = true;
-                    slog.debug("WM_SIZE {any}", .{psize});
-                    if (windowDamageRefreshCallback) |cb| cb(ctx);
                 } else slog.warn("WM_SIZE: missing hwnd", .{});
+                return 0;
+            },
+            win32.WM_ENTERSIZEMOVE => {
+                if (contextFromHwnd(hwnd)) |ctx| {
+                    _ = ctx; // autofix
+                    g_window_resizing.store(true, .release);
+                    // errdefer g_window_resizing.store(false, .release);
+                    // g_window_resizing_thread = std.Thread.spawn(.{}, windowResizeWorker, .{ctx}) catch return 0;
+                }
+                return 0;
+            },
+            win32.WM_EXITSIZEMOVE => {
+                g_window_resizing.store(false, .release);
+                // if (g_window_resizing_thread) |t| t.join();
+                return 0;
+            },
+            win32.WM_ERASEBKGND => {
                 return 0;
             },
 
