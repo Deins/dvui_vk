@@ -46,13 +46,6 @@
             .hash = "N-V-__8AAB3SBAKySRcX3yPGLhjKZreuo_mCzCTRBgkE1e-v",
             .lazy = true,
         },
-
-        // TODO: remove or make truly optional, here to ease debugging
-        .ztracy = .{
-            .url = "git+https://github.com/zig-gamedev/ztracy#e7b401dea9ce006f8b236e3a2ca1a9f3d5c3e896",
-            .hash = "ztracy-0.14.0-dev-zHJSq78GGQC904aYvBPn6OOvRVOq_opAwDfeHZdvQyej",
-            .lazy = true,
-        },
     },
     .paths = .{ "build.zig", "build.zig.zon", "src" },
 }

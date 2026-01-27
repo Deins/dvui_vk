@@ -162,6 +162,8 @@ pub const WindowContext = struct {
     surface: vk.SurfaceKHR = vk.SurfaceKHR.null_handle,
     swapchain_state: ?SwapchainState = null,
 
+    arena: std.mem.Allocator = undefined,
+
     hwnd: if (builtin.os.tag != .windows) void else *anyopaque, // win32.HWND
     glfw_win: ?*c_long = null,
 

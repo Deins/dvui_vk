@@ -46,7 +46,7 @@ pub fn dvuiBackend(context: *WindowContext) dvui.Backend {
     return dvui.Backend.init(@ptrCast(@alignCast(context)));
 }
 
-/// to support multiple windows @This pointer is used as per dvui.window context from
+/// to support multiple windows @This pointer is used as per dvui.window context (*dvui_vk_common.WindowContext)
 pub const ContextHandle = *@This();
 comptime {
     if (@sizeOf(@This()) != 0) unreachable;
@@ -87,8 +87,9 @@ pub fn sleep(_: ContextHandle, ns: u64) void {
 /// rendering.  Use to setup anything needed for this frame.  The arena
 /// arg is cleared before `dvui.Window.begin` is called next, useful for any
 /// temporary allocations needed only for this frame.
-pub fn begin(context_handle: ContextHandle, arena: std.mem.Allocator) GenericError!void {
-    context_handle.renderer().begin(arena, context_handle.pixelSize());
+pub fn begin(context_handle: ContextHandle, arena_: std.mem.Allocator) GenericError!void {
+    get(context_handle).arena = arena_;
+    context_handle.renderer().begin(arena_, context_handle.pixelSize());
 }
 
 /// Called during `dvui.Window.end` before freeing any memory for the current frame.
@@ -172,15 +173,16 @@ pub fn renderTarget(ch: ContextHandle, texture: ?dvui.TextureTarget) GenericErro
 
 /// Get clipboard content (text only)
 pub fn clipboardText(self: ContextHandle) GenericError![]const u8 {
-    _ = self; // autofix
-    return "";
+    return glfw.getClipboardString(get(self).glfw_win) orelse return error.BackendError;
 }
 
 /// Set clipboard content (text only)
 pub fn clipboardTextSet(self: ContextHandle, text: []const u8) GenericError!void {
-    _ = self; // autofix
-    _ = text; // autofix
-
+    const ctx = get(self);
+    if (text.len == 0) return;
+    const c_text = try ctx.arena.dupeZ(u8, text);
+    defer ctx.arena.free(c_text);
+    glfw.setClipboardString(ctx.glfw_win, c_text.ptr);
 }
 
 /// Open URL in system browser
