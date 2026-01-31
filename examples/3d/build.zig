@@ -61,8 +61,10 @@ pub fn build(b: *Build) !void {
     });
     exe_standalone.root_module.addImport("dvui", dvui_module);
     exe_standalone.root_module.addImport("vulkan", vkzig_dep.module("vulkan-zig"));
-    exe_standalone.root_module.addImport("zig_math", b.dependency("zig_math", .{ .target = target }).module("zig_math"));
+    // exe_standalone.root_module.addImport("zig_math", b.dependency("zig_math", .{ .target = target }).module("zig_math"));
     exe_standalone.root_module.addImport("zmath", b.dependency("zmath", .{ .target = target, .optimize = .ReleaseFast }).module("root"));
+    exe_standalone.root_module.addImport("zgltf", b.dependency("zgltf", .{ .target = target, .optimize = optimize }).module("zgltf"));
+
     // if (target.result.os.tag == .windows) {
     //     exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
     //     exe_standalone.subsystem = .Windows;

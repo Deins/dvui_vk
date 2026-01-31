@@ -7,13 +7,17 @@
         .dvui_vk = .{
             .path = "../..",
         },
-        .zig_math = .{
-            .url = "git+https://github.com/nils-mathieu/zig_math#80224ae6b3f919af74bc47aa052642883a5a0499",
-            .hash = "zig_math-0.0.2-QZAfd2SNBQACr_ss3tshIegRZFAO2OYJxA2_qFa8Fn6k",
-        },
+        // .zig_math = .{
+        //     .url = "git+https://github.com/nils-mathieu/zig_math#80224ae6b3f919af74bc47aa052642883a5a0499",
+        //     .hash = "zig_math-0.0.2-QZAfd2SNBQACr_ss3tshIegRZFAO2OYJxA2_qFa8Fn6k",
+        // },
         .zmath = .{
             .url = "git+https://github.com/zig-gamedev/zmath.git#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
             .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+        },
+        .zgltf = .{
+            .url = "git+https://github.com/kooparse/zgltf.git#ec52d477db346af99d4cdced4e35e67e1670023f",
+            .hash = "zgltf-0.1.0-sX6QAt0SAgDzMQCCG-N181hVbx8JnwFYZ3luQigQpVBM",
         },
     },
     .paths = .{""},

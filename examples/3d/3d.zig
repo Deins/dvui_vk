@@ -5,6 +5,8 @@ const vk = @import("vulkan");
 // const zm = @import("zig_math");
 const zm = @import("zmath");
 
+const zgltf = @import("zgltf");
+
 const DvuiVkBackend = dvui.backend;
 const uses_win32 = builtin.target.os.tag == .windows and @hasDecl(DvuiVkBackend, "win32");
 const win32 = if (uses_win32) DvuiVkBackend.win32 else void;
@@ -15,9 +17,12 @@ const uses_glfw = @hasDecl(DvuiVkBackend, "glfw");
 const glfw = if (uses_glfw) DvuiVkBackend.glfw else void;
 const FrameSync = DvuiVkBackend.FrameSync;
 const slog = std.log.scoped(.main);
+const VkContext = DvuiVkBackend.VkContext;
 
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
 const fs_spv align(64) = @embedFile("3d.frag.spv").*;
+
+const zig_logo_3d align(64) = @embedFile("zig_3d.glb").*;
 
 const Mat4 = zm.Matrix(4, 4, f32, .{});
 
@@ -141,7 +146,7 @@ pub const AppState = struct {
         var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
             .extended_dynamic_state = .true,
         };
-        b.vkc = try DvuiVkBackend.VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurface, .{
+        b.vkc = try VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurface, .{
             .device_select_settings = .{
                 .required_extensions = &.{
                     vk.extensions.khr_swapchain.name,
@@ -229,61 +234,14 @@ pub var g_app_state: AppState = undefined;
 pub var g_scene: Scene = undefined;
 
 pub const Scene = struct {
-    host_visible_mem: vk.DeviceMemory,
-    host_vis_data: []u8,
-    index_buffer: vk.Buffer,
-    vertex_buffer: vk.Buffer,
-    pipeline_layout: vk.PipelineLayout,
-    pipeline: vk.Pipeline,
     timer: std.time.Timer,
+    pipeline_layout: vk.PipelineLayout,
+    pipeline_cache: ShaderPipelineCache,
+    model: Model,
 
-    pub fn init() !Scene {
-        const dev: vk.DeviceProxy = g_app_state.backend.vkc.device;
-        const vk_alloc = null;
-        const indices_bytes = std.mem.sliceAsBytes(&Cube.indices);
-        const vertices_bytes = std.mem.sliceAsBytes(&Cube.vertices);
-        var index_buffer = vk.Buffer.null_handle;
-        var vertex_buffer = vk.Buffer.null_handle;
-
-        // TODO: here we are lazy, we just allocate some host visible mem that we can directly write mesh to. we should transfer mem to gpu normally
-        const size: usize = vertices_bytes.len + indices_bytes.len + 64; // +64 for alignment space in between
-        const host_visible_mem = try dev.allocateMemory(&.{
-            .allocation_size = size,
-            .memory_type_index = g_app_state.backend.renderer.?.host_vis_mem_idx,
-        }, vk_alloc);
-        errdefer dev.freeMemory(host_visible_mem, vk_alloc);
-        const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..size];
-        @memcpy(host_vis_data[0..vertices_bytes.len], vertices_bytes);
-        const dst: []u8 = std.mem.alignInSlice(host_vis_data[vertices_bytes.len..], @alignOf(@TypeOf(Cube.indices[0]))).?[0..indices_bytes.len];
-        @memcpy(dst, indices_bytes);
-
-        var mem_offset: usize = 0;
-        { // vertex buf
-            const buf = try dev.createBuffer(&.{
-                .size = @sizeOf(@TypeOf(Cube.vertices)),
-                .usage = .{ .vertex_buffer_bit = true },
-                .sharing_mode = .exclusive,
-            }, vk_alloc);
-            errdefer dev.destroyBuffer(buf, vk_alloc);
-            const mreq = dev.getBufferMemoryRequirements(buf);
-            mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-            try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-            mem_offset += mreq.size;
-            vertex_buffer = buf;
-        }
-        { // index buf
-            const buf = try dev.createBuffer(&.{
-                .size = @sizeOf(@TypeOf(Cube.indices)),
-                .usage = .{ .index_buffer_bit = true },
-                .sharing_mode = .exclusive,
-            }, vk_alloc);
-            errdefer dev.destroyBuffer(buf, vk_alloc);
-            const mreq = dev.getBufferMemoryRequirements(buf);
-            mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-            try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-            mem_offset += mreq.size;
-            index_buffer = buf;
-        }
+    pub fn init(alloc: std.mem.Allocator, vkc: VkContext) !Scene {
+        const dev: vk.DeviceProxy = vkc.device;
+        const model = try Model.initFromBuffer(alloc, &zig_logo_3d, vkc);
 
         const layout = try dev.createPipelineLayout(&.{
             .flags = .{},
@@ -295,31 +253,63 @@ pub const Scene = struct {
                 .offset = 0,
                 .size = @sizeOf(f32) * 4 * 4 * 3,
             }},
-        }, vk_alloc);
+        }, vkc.alloc);
+
+        // Scene Pipeline
+        //  NOTE: VK_KHR_maintenance5 (which was promoted to vulkan 1.4) deprecates ShaderModules.
+        // todo: check for extension and then enable
+        const ext_m5 = false; // VK_KHR_maintenance5
+        const vert_shdd = vk.ShaderModuleCreateInfo{
+            .code_size = vs_spv.len,
+            .p_code = @ptrCast(&vs_spv),
+        };
+        const frag_shdd = vk.ShaderModuleCreateInfo{
+            .code_size = fs_spv.len,
+            .p_code = @ptrCast(&fs_spv),
+        };
+        var pssci = [_]vk.PipelineShaderStageCreateInfo{
+            .{
+                .stage = .{ .vertex_bit = true },
+                .p_name = "main",
+                .module = if (ext_m5) null else try dev.createShaderModule(&vert_shdd, vkc.alloc),
+                .p_next = if (ext_m5) &vert_shdd else null,
+            },
+            .{
+                .stage = .{ .fragment_bit = true },
+                //.module = frag,
+                .p_name = "main",
+                .module = if (ext_m5) null else try dev.createShaderModule(&frag_shdd, vkc.alloc),
+                .p_next = if (ext_m5) &frag_shdd else null,
+            },
+        };
+        defer if (!ext_m5) for (pssci) |p| if (p.module != .null_handle) dev.destroyShaderModule(p.module, vkc.alloc);
+
+        var pip_cache = ShaderPipelineCache.init(.{
+            .layout = layout,
+            .render_pass = g_app_state.render_pass,
+            .pssci = &pssci, // TODO: free
+        });
+        errdefer pip_cache.deinit(vkc);
+        // create pipelines at load time
+        for (model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(model, mesh, vkc);
+
         return .{
-            .host_visible_mem = host_visible_mem,
-            .host_vis_data = host_vis_data,
-            .index_buffer = index_buffer,
-            .vertex_buffer = vertex_buffer,
-            .pipeline = try createScenePipeline(dev, layout, g_app_state.render_pass, vk_alloc),
             .pipeline_layout = layout,
             .timer = try std.time.Timer.start(),
+            .pipeline_cache = pip_cache,
+            .model = model,
         };
     }
 
-    pub fn deinit(self: Scene) void {
-        const vk_alloc = null;
+    pub fn deinit(self: Scene, alloc: std.mem.Allocator) void {
+        const vkc = g_app_state.backend.vkc;
         const dev = g_app_state.backend.vkc.device;
-        dev.destroyBuffer(self.vertex_buffer, vk_alloc);
-        dev.destroyBuffer(self.index_buffer, vk_alloc);
-        dev.freeMemory(self.host_visible_mem, vk_alloc);
-        dev.destroyPipeline(self.pipeline, vk_alloc);
-        dev.destroyPipelineLayout(self.pipeline_layout, vk_alloc);
+        dev.destroyPipelineLayout(self.pipeline_layout, vkc.alloc);
+        self.model.deinit(alloc, vkc);
     }
 
     pub fn draw(self: *Scene, cmdbuf: vk.CommandBuffer) void {
         const dev = g_app_state.backend.vkc.device;
-        dev.cmdBindPipeline(cmdbuf, .graphics, self.pipeline);
 
         var framebuffer_size = g_app_state.backend.contexts.items[0].last_pixel_size;
         if (framebuffer_size.w < 1) framebuffer_size.w = 1;
@@ -340,36 +330,35 @@ pub const Scene = struct {
         };
         dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
 
-        // const PushConstants = extern struct {
-        //     model: zm.Mat4f = zm.Mat4f.identity,
-        //     view: zm.Mat4f = zm.Mat4f.identity,
-        //     projection: zm.Mat4f,
-        // };
-        // var push_constants = PushConstants{
-        //     .projection = zm.Mat4f.perspectiveGl(std.math.degreesToRadians(60), framebuffer_size.w / framebuffer_size.h, 0.001, 9999),
-        //     .model = zm.Mat4f.fromTranslation(zm.FastVec3f.initXYZ(0, 0, 2)),
-        // };
-        // push_constants.projection = push_constants.projection.mulMatrix(4, push_constants.model);
         const PushConstants = extern struct {
-            // model: zm.Mat,
-            // view: zm.Mat,
-            // projection: zm.Mat,
             mvp: zm.Mat,
+            col: [4]f32 = .{ 1, 1, 1, 1 },
         };
+
         const t: f32 = @as(f32, @floatFromInt(self.timer.read() / std.time.ns_per_ms)) / 1000; // sec f32
-        const rotation = zm.mul(zm.rotationX(t), zm.rotationY(t));
-        const model = zm.mul(rotation, zm.translation(0, 0, -10));
+        const rotation = zm.mul(zm.rotationX(std.math.sin(t) * 0.5 - std.math.pi * 0.5), zm.rotationY(std.math.sin(t) * 0.7));
+        const scaling = zm.scaling(50, 50, 50);
+        const model = zm.mul(zm.mul(scaling, rotation), zm.translation(0, 0, -10));
         const view = zm.identity();
         const projection = zm.perspectiveFovRh(std.math.degreesToRadians(60.0), framebuffer_size.w / framebuffer_size.h, 0.01, 100);
-        const push_constants = PushConstants{
+        var push_constants = PushConstants{
             .mvp = zm.mul(model, zm.mul(view, projection)),
         };
-        if (@sizeOf(f32) * 4 * 4 != @sizeOf(@TypeOf(push_constants))) unreachable;
+        if (@sizeOf(f32) * 4 * 4 + 4 * @sizeOf(f32) != @sizeOf(@TypeOf(push_constants))) unreachable;
         dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
 
-        dev.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, .uint16);
-        dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&self.vertex_buffer), &[_]vk.DeviceSize{0});
-        dev.cmdDrawIndexed(cmdbuf, @intCast(Cube.indices.len), 1, 0, 0, 0);
+        // dev.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, .uint16);
+        // dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&self.vertex_buffer), &[_]vk.DeviceSize{0});
+        // dev.cmdDrawIndexed(cmdbuf, @intCast(Cube.indices.len), 1, 0, 0, 0);
+
+        for (self.model.meshes) |mesh| {
+            const pipeline = self.pipeline_cache.get(mesh);
+            dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+
+            push_constants.col = self.model.materials[mesh.material].metallic_roughness.base_color_factor;
+            dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+            mesh.draw(dev, cmdbuf);
+        }
     }
 };
 
@@ -456,9 +445,10 @@ pub fn main() !void {
 
     g_app_state = try AppState.init(gpa);
     defer g_app_state.deinit(gpa);
+    const vkc = g_app_state.backend.vkc;
 
-    g_scene = try Scene.init();
-    defer g_scene.deinit();
+    g_scene = try Scene.init(gpa, vkc);
+    defer g_scene.deinit(gpa);
 
     // hijack the dvui pipeline, so that it accepts depth buffer
     g_app_state.device().destroyPipeline(g_app_state.backend.renderer.?.pipeline, g_app_state.backend.renderer.?.vk_alloc);
@@ -625,50 +615,6 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     // slog.debug("frame done", .{});
 }
 
-fn createScenePipeline(
-    dev: vk.DeviceProxy,
-    layout: vk.PipelineLayout,
-    render_pass: vk.RenderPass,
-    vk_alloc: ?*vk.AllocationCallbacks,
-) vk.DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
-    //  NOTE: VK_KHR_maintenance5 (which was promoted to vulkan 1.4) deprecates ShaderModules.
-    // todo: check for extension and then enable
-    const ext_m5 = false; // VK_KHR_maintenance5
-    const vert_shdd = vk.ShaderModuleCreateInfo{
-        .code_size = vs_spv.len,
-        .p_code = @ptrCast(&vs_spv),
-    };
-    const frag_shdd = vk.ShaderModuleCreateInfo{
-        .code_size = fs_spv.len,
-        .p_code = @ptrCast(&fs_spv),
-    };
-    const pssci = [_]vk.PipelineShaderStageCreateInfo{
-        .{
-            .stage = .{ .vertex_bit = true },
-            .p_name = "main",
-            .module = if (ext_m5) null else try dev.createShaderModule(&vert_shdd, vk_alloc),
-            .p_next = if (ext_m5) &vert_shdd else null,
-        },
-        .{
-            .stage = .{ .fragment_bit = true },
-            //.module = frag,
-            .p_name = "main",
-            .module = if (ext_m5) null else try dev.createShaderModule(&frag_shdd, vk_alloc),
-            .p_next = if (ext_m5) &frag_shdd else null,
-        },
-    };
-    defer if (!ext_m5) for (pssci) |p| if (p.module != .null_handle) dev.destroyShaderModule(p.module, vk_alloc);
-
-    const pvisci = vk.PipelineVertexInputStateCreateInfo{
-        .vertex_binding_description_count = VertexBindings.binding_description.len,
-        .p_vertex_binding_descriptions = &VertexBindings.binding_description,
-        .vertex_attribute_description_count = VertexBindings.attribute_description.len,
-        .p_vertex_attribute_descriptions = &VertexBindings.attribute_description,
-    };
-
-    return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
-}
-
 fn createDvuiPipeline(
     dev: vk.DeviceProxy,
     layout: vk.PipelineLayout,
@@ -722,6 +668,7 @@ fn createPipeline(
     vk_alloc: ?*vk.AllocationCallbacks,
 ) vk.DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
     const piasci = vk.PipelineInputAssemblyStateCreateInfo{
+        // .topology = .line_list,
         .topology = .triangle_list,
         .primitive_restart_enable = .false,
     };
@@ -883,12 +830,14 @@ pub fn acquireImageMaybeRecreate(
 }
 
 const VertexBindings = struct {
+    // vertex layut
     const binding_description = [_]vk.VertexInputBindingDescription{.{
         .binding = 0,
         .stride = @sizeOf(f32) * 4,
         .input_rate = .vertex,
     }};
 
+    // shader
     const attribute_description = [_]vk.VertexInputAttributeDescription{
         .{
             .binding = 0,
@@ -911,37 +860,331 @@ const VertexBindings = struct {
     };
 };
 
-pub const Cube = struct {
-    pub const vertices = [_][4]f32{
-        // Front face
-        .{ -0.5, -0.5, 0.5, 0 },
-        .{ 0.5, -0.5, 0.5, 1 },
-        .{ 0.5, 0.5, 0.5, 2 },
-        .{ -0.5, 0.5, 0.5, 3 },
-        // Back face
-        .{ -0.5, -0.5, -0.5, 4 },
-        .{ 0.5, -0.5, -0.5, 5 },
-        .{ 0.5, 0.5, -0.5, 6 },
-        .{ -0.5, 0.5, -0.5, 7 },
+pub const Model = struct {
+    dev_mem: vk.DeviceMemory = .null_handle,
+    buffer: vk.Buffer = vk.Buffer.null_handle,
+
+    meshes: []Mesh = &.{},
+    // buffers: []vk.Buffer = &.{},
+    // TODO: should actually have some fancier system that can cache same renderpasses. Additionally render-pass is tied to model unrelated stuff such as framebuffer etc. So needs to be done differently.
+    // renderpass: vk.RenderPass,
+    accessors: []zgltf.Gltf.Accessor,
+    materials: []zgltf.Gltf.Material,
+
+    pub const Mesh = struct {
+        // currently lock down vertex attributes to this fixed
+        pub const Attribute = enum {
+            pos,
+            col,
+            norm,
+            uv,
+        };
+        pub const max_attributes = std.meta.fields(Model.Mesh.Attribute).len;
+        pub const AttributeBinding = struct {
+            buffer: vk.Buffer = vk.Buffer.null_handle, // doesn't own
+            offset: vk.DeviceSize = 0,
+        };
+        attributes: [max_attributes]AttributeBinding = [1]AttributeBinding{.{}} ** max_attributes,
+        indices: AttributeBinding = .{},
+        indices_len: u32 = 0,
+        // for pipeline creation, points to model accesors
+        accessors: [max_attributes]u8,
+        material: u16 = 0, // points to Model.materials
+
+        pub fn attributeMask(self: @This()) u8 {
+            var mask: u8 = 0;
+            for (self.attributes, 0..) |a, i| {
+                if (a.buffer != .null_handle) mask |= @as(u8, 1) << @intCast(i);
+            }
+            return mask;
+        }
+
+        pub fn draw(self: @This(), dev: vk.DeviceProxy, cmdbuf: vk.CommandBuffer) void {
+            dev.cmdBindIndexBuffer(cmdbuf, self.indices.buffer, self.indices.offset, .uint16);
+            var vert_buffers: [max_attributes]vk.Buffer = undefined;
+            var vert_offsets: [max_attributes]vk.DeviceSize = undefined;
+            var count: usize = 0;
+            for (self.attributes) |a| {
+                if (a.buffer != .null_handle) {
+                    vert_buffers[count] = a.buffer;
+                    vert_offsets[count] = a.offset;
+                    count += 1;
+                }
+            }
+            dev.cmdBindVertexBuffers(cmdbuf, 0, @intCast(count), &vert_buffers, &vert_offsets);
+            dev.cmdDrawIndexed(cmdbuf, @intCast(self.indices_len), 1, 0, 0, 0);
+        }
     };
-    pub const indices = [_]u16{
-        // Front
-        0, 1, 2,
-        2, 3, 0,
-        // Right
-        1, 5, 6,
-        6, 2, 1,
-        // Back
-        5, 4, 7,
-        7, 6, 5,
-        // Left
-        4, 0, 3,
-        3, 7, 4,
-        // Top
-        3, 2, 6,
-        6, 7, 3,
-        // Bottom
-        4, 5, 1,
-        1, 0, 4,
+
+    pub fn initFromBuffer(alloc: std.mem.Allocator, gltb_content: []align(4) const u8, vkc: VkContext) !Model {
+        const dev = vkc.device;
+        const vk_alloc = vkc.alloc;
+
+        var gltf = zgltf.Gltf.init(alloc);
+        defer gltf.deinit();
+        try gltf.parse(gltb_content);
+
+        const mem_size = blk: {
+            var s: vk.DeviceSize = 0;
+            for (gltf.data.buffers) |b| s += b.byte_length;
+            break :blk s;
+        };
+        // TODO: for static geometry using host_vis_mem is bad - implement staging to device local mem instead
+        const host_visible_mem = try dev.allocateMemory(&.{
+            .allocation_size = mem_size,
+            .memory_type_index = g_app_state.backend.renderer.?.host_vis_mem_idx,
+        }, vk_alloc);
+        errdefer dev.freeMemory(host_visible_mem, vk_alloc);
+        const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..mem_size];
+        if (gltf.glb_binary) |bin| {
+            @memcpy(host_vis_data, bin);
+        } else return error.Invalid; // TODO: at the moment support only glb with builtin buffer
+
+        // support only glb single buffer
+        const buf = try dev.createBuffer(&.{
+            .size = host_vis_data.len,
+            .usage = vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        }, vk_alloc);
+        try dev.bindBufferMemory(buf, host_visible_mem, 0);
+
+        // const buffers = try alloc.alloc(vk.Buffer, gltf.data.buffer_views.len);
+        // errdefer alloc.free(buffers);
+        // for (gltf.data.buffer_views, 0..) |*bv, bi| {
+        //     std.debug.assert(bv.buffer == 0); // TODO: currently assuming glb format with single buffer
+        //     const usage: vk.BufferUsageFlags = if (bv.target) |t| switch (t) {
+        //         .array_buffer => vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
+        //         .element_array_buffer => vk.BufferUsageFlags{ .index_buffer_bit = true },
+        //     } else vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true };
+        //     if (bv.target == null) slog.debug("gltf buffer view is without target - potentially suboptimal!", .{});
+
+        //     const buf = try dev.createBuffer(&.{
+        //         .size = bv.byte_length,
+        //         .usage = usage,
+        //         .sharing_mode = .exclusive,
+        //     }, vk_alloc);
+        //     errdefer dev.destroyBuffer(buf, vk_alloc);
+        //     const mreq = dev.getBufferMemoryRequirements(buf);
+        //     const mem_offset = std.mem.alignForward(usize, bv.byte_offset, mreq.alignment);
+        //     if (mem_offset != bv.byte_offset) std.debug.panic("vulkan requires increased alignment - gltf offset {} after alignment {} is {}", .{ bv.byte_offset, mreq.alignment, mem_offset });
+        //     try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
+        //     buffers[bi] = buf;
+        // }
+
+        // we treat gltf.mesh.primitives as meshes
+        const mesh_count: usize = blk: {
+            var count: usize = 0;
+            for (gltf.data.meshes) |m| count += m.primitives.len;
+            break :blk count;
+        };
+        const meshes = try alloc.alloc(Mesh, mesh_count);
+        errdefer alloc.free(meshes);
+        for (gltf.data.meshes, meshes) |in_mesh, *out_mesh| {
+            out_mesh.* = .{ .accessors = undefined };
+            for (in_mesh.primitives) |primitive| {
+                for (primitive.attributes) |attr| {
+                    const accessor_idx: usize = switch (attr) {
+                        inline else => |a| a,
+                    };
+                    const attribute: Mesh.Attribute = switch (attr) {
+                        .position => .pos,
+                        .normal => .norm,
+                        //.tangent
+                        //.texcoord
+                        .color => .col,
+                        //.joints
+                        //.weights
+                        else => continue,
+                    };
+
+                    if (accessor_idx >= gltf.data.accessors.len) return error.OutOfBounds;
+                    const accessor = gltf.data.accessors[accessor_idx];
+                    if (accessor.buffer_view == null) return error.OutOfBounds;
+                    if (gltf.data.buffer_views.len <= accessor.buffer_view.?) return error.OutOfBounds;
+                    const buf_view = gltf.data.buffer_views[accessor.buffer_view.?];
+                    out_mesh.attributes[@intFromEnum(attribute)] = .{
+                        .buffer = buf,
+                        .offset = accessor.byte_offset + buf_view.byte_offset,
+                    };
+                    out_mesh.accessors[@intFromEnum(attribute)] = @intCast(accessor_idx);
+                }
+                if (primitive.indices) |accessor_idx| { // index buffer
+                    if (accessor_idx >= gltf.data.accessors.len) return error.OutOfBounds;
+                    const accessor = gltf.data.accessors[accessor_idx];
+                    if (accessor.buffer_view == null) return error.OutOfBounds;
+                    if (gltf.data.buffer_views.len <= accessor.buffer_view.?) return error.OutOfBounds;
+                    const buf_view = gltf.data.buffer_views[accessor.buffer_view.?];
+                    out_mesh.indices = .{
+                        .buffer = buf,
+                        .offset = accessor.byte_offset + buf_view.byte_offset,
+                    };
+                    out_mesh.indices_len = @intCast(accessor.count);
+                    if (accessor.type != .scalar) return error.InvalidIndices;
+                    if (accessor.normalized) return error.InvalidIndices;
+                    if (accessor.component_type != .unsigned_short) return error.InvalidIndices;
+                    out_mesh.material = @intCast(@min(gltf.data.materials.len, primitive.material orelse 0));
+                }
+            }
+        }
+
+        // const vert_bind = try alloc.alloc(vk.VertexInputBindingDescription, )
+        // var pvisci = vk.PipelineVertexInputStateCreateInfo{
+        //     .vertex_binding_description_count = VertexBindings.binding_description.len,
+        //     .p_vertex_binding_descriptions = ,
+        //     .vertex_attribute_description_count = VertexBindings.attribute_description.len,
+        //     .p_vertex_attribute_descriptions = &VertexBindings.attribute_description,
+        // };
+        // return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
+
+        // for (gltf.data.buffers) |b| {
+        //     const size: usize = b.byte_length;
+
+        //     const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..size];
+        //     @memcpy(host_vis_data[0..vertices_bytes.len], vertices_bytes);
+        //     const dst: []u8 = std.mem.alignInSlice(host_vis_data[vertices_bytes.len..], @alignOf(@TypeOf(Cube.indices[0]))).?[0..indices_bytes.len];
+        //     @memcpy(dst, indices_bytes);
+
+        //     var mem_offset: usize = 0;
+        //     { // vertex buf
+        //         const buf = try dev.createBuffer(&.{
+        //             .size = @sizeOf(@TypeOf(Cube.vertices)),
+        //             .usage = .{ .vertex_buffer_bit = true },
+        //             .sharing_mode = .exclusive,
+        //         }, vk_alloc);
+        //         errdefer dev.destroyBuffer(buf, vk_alloc);
+        //         const mreq = dev.getBufferMemoryRequirements(buf);
+        //         mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
+        //         try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
+        //         mem_offset += mreq.size;
+        //         vertex_buffer = buf;
+        //     }
+        //     { // index buf
+        //         const buf = try dev.createBuffer(&.{
+        //             .size = @sizeOf(@TypeOf(Cube.indices)),
+        //             .usage = .{ .index_buffer_bit = true },
+        //             .sharing_mode = .exclusive,
+        //         }, vk_alloc);
+        //         errdefer dev.destroyBuffer(buf, vk_alloc);
+        //         const mreq = dev.getBufferMemoryRequirements(buf);
+        //         mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
+        //         try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
+        //         mem_offset += mreq.size;
+        //         index_buffer = buf;
+        //     }
+        // }
+
+        const accessors = try alloc.dupe(zgltf.Gltf.Accessor, gltf.data.accessors);
+        errdefer alloc.free(accessors);
+        const materials = try alloc.dupe(zgltf.Gltf.Material, gltf.data.materials);
+        errdefer alloc.free(materials);
+
+        return .{
+            .dev_mem = host_visible_mem,
+            .buffer = buf,
+            .meshes = meshes,
+            .accessors = accessors,
+            .materials = materials,
+        };
+    }
+
+    // pub fn draw(self: @This(), dev: vk.DeviceProxy, cmdbuf: vk.CommandBuffer) void {
+    //     for (self.meshes) |mesh| {
+    //         mesh.draw(dev, cmdbuf);
+    //     }
+    // }
+
+    pub fn deinit(self: @This(), alloc: std.mem.Allocator, vkc: VkContext) void {
+        vkc.device.freeMemory(self.dev_mem, vkc.alloc);
+        // alloc.free(self.buffers);
+        alloc.free(self.meshes);
+        alloc.free(self.accessors);
+        alloc.free(self.materials);
+    }
+};
+
+pub const ShaderPipelineCache = struct {
+    const max_attributes = Model.Mesh.max_attributes;
+    const max_permutations = (1 << max_attributes);
+    pipelines: [max_permutations]vk.Pipeline = [_]vk.Pipeline{.null_handle} ** max_permutations,
+
+    // not owned
+    pipeline_description: PipelineDescription,
+    pub const PipelineDescription = struct {
+        render_pass: vk.RenderPass,
+        layout: vk.PipelineLayout,
+        pssci: []const vk.PipelineShaderStageCreateInfo,
     };
+
+    pub fn init(pipeline_desc: PipelineDescription) @This() {
+        return .{
+            .pipeline_description = pipeline_desc,
+        };
+    }
+
+    pub fn get(self: *@This(), mesh: Model.Mesh) vk.Pipeline {
+        const mask = mesh.attributeMask();
+        const p = self.pipelines[mask];
+        if (p == .null_handle) unreachable;
+        return p;
+    }
+
+    pub fn getOrCreateMeshPipeline(self: *@This(), model: Model, mesh: Model.Mesh, vkc: VkContext) !vk.Pipeline {
+        const mask = mesh.attributeMask();
+        const p = &self.pipelines[mask];
+
+        if (p.* == .null_handle) { // create pipeline
+            const count = @popCount(mask);
+            var binding_descriptions: [max_attributes]vk.VertexInputBindingDescription = undefined;
+            var attribute_descriptions: [max_attributes]vk.VertexInputAttributeDescription = undefined;
+            const pvisci = vk.PipelineVertexInputStateCreateInfo{
+                .vertex_binding_description_count = count,
+                .p_vertex_binding_descriptions = &binding_descriptions,
+                .vertex_attribute_description_count = count,
+                .p_vertex_attribute_descriptions = &attribute_descriptions,
+            };
+            var i: u32 = 0;
+            for (mesh.attributes, 0..) |attr, attribute_type_| {
+                const attribute_type: Model.Mesh.Attribute = @enumFromInt(attribute_type_);
+                if (attr.buffer == .null_handle) continue;
+                const accessor = model.accessors[mesh.accessors[attribute_type_]];
+                const element_size: u32 = switch (accessor.component_type) {
+                    .byte => 1,
+                    .unsigned_byte => 1,
+                    .short => 2,
+                    .unsigned_short => 2,
+                    .unsigned_integer => 4,
+                    .float => 4,
+                };
+                const vector_len: u32 = switch (accessor.type) {
+                    .scalar => 1,
+                    .vec2 => 2,
+                    .vec3 => 3,
+                    .vec4 => 4,
+                    .mat2x2 => 2 * 2,
+                    .mat3x3 => 3 * 3,
+                    .mat4x4 => 4 * 4,
+                };
+                binding_descriptions[i] = .{
+                    .binding = i,
+                    .stride = element_size * vector_len,
+                    .input_rate = .vertex,
+                };
+                attribute_descriptions[i] = .{
+                    .binding = i,
+                    .location = @intFromEnum(attribute_type),
+                    .format = .r32g32b32a32_sfloat,
+                    .offset = 0, //@offsetOf(Vertex, "pos"),
+                };
+                slog.debug("attr {} stride: {any} {any}", .{ attribute_type, binding_descriptions[i].stride, attribute_descriptions[i] });
+
+                i += 1;
+            }
+            p.* = try createPipeline(vkc.device, self.pipeline_description.layout, self.pipeline_description.render_pass, self.pipeline_description.pssci, pvisci, vkc.alloc);
+        }
+        return p.*;
+    }
+
+    pub fn deinit(self: @This(), vkc: VkContext) void {
+        for (self.pipelines) |p| vkc.device.destroyPipeline(p, vkc.alloc);
+    }
 };
