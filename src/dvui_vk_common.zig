@@ -178,6 +178,7 @@ pub const WindowContext = struct {
         const Options = struct {
             desired_formats: []const vk.SurfaceFormatKHR = &.{},
             desired_present_modes: []vk.PresentModeKHR = &.{},
+            msaa: vk.SampleCountFlags = .{ .@"1_bit" = true },
         };
 
         pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {

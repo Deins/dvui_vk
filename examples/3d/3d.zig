@@ -22,7 +22,8 @@ const VkContext = DvuiVkBackend.VkContext;
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
 const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
-const zig_logo_3d align(64) = @embedFile("zig_3d.glb").*;
+const zig_logo_glb align(4) = @embedFile("zig_logo.glb").*;
+const vk_logo_glb align(4) = @embedFile("vulkan_logo.glb").*;
 
 const Mat4 = zm.Matrix(4, 4, f32, .{});
 
@@ -168,7 +169,7 @@ pub const AppState = struct {
                 .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
                 .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
             },
-            .desired_present_modes = if (!vsync) &.{.immediate_khr} else &.{.fifo_khr},
+            .desired_present_modes = if (!vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr },
         });
 
         // const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
@@ -237,11 +238,12 @@ pub const Scene = struct {
     timer: std.time.Timer,
     pipeline_layout: vk.PipelineLayout,
     pipeline_cache: ShaderPipelineCache,
-    model: Model,
+
+    zig_model: Model,
+    vk_model: Model,
 
     pub fn init(alloc: std.mem.Allocator, vkc: VkContext) !Scene {
         const dev: vk.DeviceProxy = vkc.device;
-        const model = try Model.initFromBuffer(alloc, &zig_logo_3d, vkc);
 
         const layout = try dev.createPipelineLayout(&.{
             .flags = .{},
@@ -290,14 +292,21 @@ pub const Scene = struct {
             .pssci = &pssci, // TODO: free
         });
         errdefer pip_cache.deinit(vkc);
+
+        const zig_model = try Model.initFromBuffer(alloc, &zig_logo_glb, vkc);
+        errdefer zig_model.deinit(alloc, vkc);
+        const vk_model = try Model.initFromBuffer(alloc, &vk_logo_glb, vkc);
+        errdefer vk_model.deinit(alloc, vkc);
         // create pipelines at load time
-        for (model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(model, mesh, vkc);
+        for (zig_model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(zig_model, mesh, vkc);
+        for (vk_model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(vk_model, mesh, vkc);
 
         return .{
             .pipeline_layout = layout,
             .timer = try std.time.Timer.start(),
             .pipeline_cache = pip_cache,
-            .model = model,
+            .zig_model = zig_model,
+            .vk_model = vk_model,
         };
     }
 
@@ -305,7 +314,8 @@ pub const Scene = struct {
         const vkc = g_app_state.backend.vkc;
         const dev = g_app_state.backend.vkc.device;
         dev.destroyPipelineLayout(self.pipeline_layout, vkc.alloc);
-        self.model.deinit(alloc, vkc);
+        self.zig_model.deinit(alloc, vkc);
+        self.vk_model.deinit(alloc, vkc);
     }
 
     pub fn draw(self: *Scene, cmdbuf: vk.CommandBuffer) void {
@@ -345,19 +355,37 @@ pub const Scene = struct {
             .mvp = zm.mul(model, zm.mul(view, projection)),
         };
         if (@sizeOf(f32) * 4 * 4 + 4 * @sizeOf(f32) != @sizeOf(@TypeOf(push_constants))) unreachable;
-        dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+        // dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
 
         // dev.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, .uint16);
         // dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&self.vertex_buffer), &[_]vk.DeviceSize{0});
         // dev.cmdDrawIndexed(cmdbuf, @intCast(Cube.indices.len), 1, 0, 0, 0);
 
-        for (self.model.meshes) |mesh| {
-            const pipeline = self.pipeline_cache.get(mesh);
-            dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+        {
+            const m = self.zig_model;
+            push_constants.mvp = zm.mul(zm.mul(model, zm.translation(0, -1, 0)), zm.mul(view, projection));
+            for (m.meshes) |mesh| {
+                const pipeline = self.pipeline_cache.get(mesh);
+                dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
 
-            push_constants.col = self.model.materials[mesh.material].metallic_roughness.base_color_factor;
-            dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
-            mesh.draw(dev, cmdbuf);
+                push_constants.col = m.materials[mesh.material].metallic_roughness.base_color_factor;
+                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+
+                mesh.draw(dev, cmdbuf);
+            }
+        }
+        {
+            const m = self.vk_model;
+            push_constants.mvp = zm.mul(zm.mul(model, zm.translation(0, 1, 0)), zm.mul(view, projection));
+            for (m.meshes) |mesh| {
+                const pipeline = self.pipeline_cache.get(mesh);
+                dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
+
+                push_constants.col = m.materials[mesh.material].metallic_roughness.base_color_factor;
+                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+
+                mesh.draw(dev, cmdbuf);
+            }
         }
     }
 };
@@ -424,6 +452,12 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 
 pub const max_frames_in_flight = 2;
 pub const vsync = false;
+
+pub fn msaaBits(vkc: VkContext, desired_msaa: vk.SampleCountFlags) vk.SampleCountFlags {
+    const limits = vkc.physical_device.properties.limits;
+    const msaa_limit = limits.framebuffer_color_sample_counts & limits.framebuffer_depth_sample_counts;
+    return @min(desired_msaa, msaa_limit);
+}
 
 pub fn main() !void {
     if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
@@ -948,29 +982,6 @@ pub const Model = struct {
         }, vk_alloc);
         try dev.bindBufferMemory(buf, host_visible_mem, 0);
 
-        // const buffers = try alloc.alloc(vk.Buffer, gltf.data.buffer_views.len);
-        // errdefer alloc.free(buffers);
-        // for (gltf.data.buffer_views, 0..) |*bv, bi| {
-        //     std.debug.assert(bv.buffer == 0); // TODO: currently assuming glb format with single buffer
-        //     const usage: vk.BufferUsageFlags = if (bv.target) |t| switch (t) {
-        //         .array_buffer => vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
-        //         .element_array_buffer => vk.BufferUsageFlags{ .index_buffer_bit = true },
-        //     } else vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true };
-        //     if (bv.target == null) slog.debug("gltf buffer view is without target - potentially suboptimal!", .{});
-
-        //     const buf = try dev.createBuffer(&.{
-        //         .size = bv.byte_length,
-        //         .usage = usage,
-        //         .sharing_mode = .exclusive,
-        //     }, vk_alloc);
-        //     errdefer dev.destroyBuffer(buf, vk_alloc);
-        //     const mreq = dev.getBufferMemoryRequirements(buf);
-        //     const mem_offset = std.mem.alignForward(usize, bv.byte_offset, mreq.alignment);
-        //     if (mem_offset != bv.byte_offset) std.debug.panic("vulkan requires increased alignment - gltf offset {} after alignment {} is {}", .{ bv.byte_offset, mreq.alignment, mem_offset });
-        //     try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-        //     buffers[bi] = buf;
-        // }
-
         // we treat gltf.mesh.primitives as meshes
         const mesh_count: usize = blk: {
             var count: usize = 0;
@@ -1027,52 +1038,6 @@ pub const Model = struct {
             }
         }
 
-        // const vert_bind = try alloc.alloc(vk.VertexInputBindingDescription, )
-        // var pvisci = vk.PipelineVertexInputStateCreateInfo{
-        //     .vertex_binding_description_count = VertexBindings.binding_description.len,
-        //     .p_vertex_binding_descriptions = ,
-        //     .vertex_attribute_description_count = VertexBindings.attribute_description.len,
-        //     .p_vertex_attribute_descriptions = &VertexBindings.attribute_description,
-        // };
-        // return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
-
-        // for (gltf.data.buffers) |b| {
-        //     const size: usize = b.byte_length;
-
-        //     const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..size];
-        //     @memcpy(host_vis_data[0..vertices_bytes.len], vertices_bytes);
-        //     const dst: []u8 = std.mem.alignInSlice(host_vis_data[vertices_bytes.len..], @alignOf(@TypeOf(Cube.indices[0]))).?[0..indices_bytes.len];
-        //     @memcpy(dst, indices_bytes);
-
-        //     var mem_offset: usize = 0;
-        //     { // vertex buf
-        //         const buf = try dev.createBuffer(&.{
-        //             .size = @sizeOf(@TypeOf(Cube.vertices)),
-        //             .usage = .{ .vertex_buffer_bit = true },
-        //             .sharing_mode = .exclusive,
-        //         }, vk_alloc);
-        //         errdefer dev.destroyBuffer(buf, vk_alloc);
-        //         const mreq = dev.getBufferMemoryRequirements(buf);
-        //         mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-        //         try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-        //         mem_offset += mreq.size;
-        //         vertex_buffer = buf;
-        //     }
-        //     { // index buf
-        //         const buf = try dev.createBuffer(&.{
-        //             .size = @sizeOf(@TypeOf(Cube.indices)),
-        //             .usage = .{ .index_buffer_bit = true },
-        //             .sharing_mode = .exclusive,
-        //         }, vk_alloc);
-        //         errdefer dev.destroyBuffer(buf, vk_alloc);
-        //         const mreq = dev.getBufferMemoryRequirements(buf);
-        //         mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-        //         try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-        //         mem_offset += mreq.size;
-        //         index_buffer = buf;
-        //     }
-        // }
-
         const accessors = try alloc.dupe(zgltf.Gltf.Accessor, gltf.data.accessors);
         errdefer alloc.free(accessors);
         const materials = try alloc.dupe(zgltf.Gltf.Material, gltf.data.materials);
@@ -1086,12 +1051,6 @@ pub const Model = struct {
             .materials = materials,
         };
     }
-
-    // pub fn draw(self: @This(), dev: vk.DeviceProxy, cmdbuf: vk.CommandBuffer) void {
-    //     for (self.meshes) |mesh| {
-    //         mesh.draw(dev, cmdbuf);
-    //     }
-    // }
 
     pub fn deinit(self: @This(), alloc: std.mem.Allocator, vkc: VkContext) void {
         vkc.device.freeMemory(self.dev_mem, vkc.alloc);

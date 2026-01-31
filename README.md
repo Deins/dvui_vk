@@ -4,6 +4,8 @@
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
 Targeting `vulkan 1.2` an newer and `zig v0.15.2` (see tags for older ver)
 
+![screenshot](examples/3d/screenshot.png)
+
 ### Current platform support
 
 * **Windows** native
@@ -46,6 +48,4 @@ Similarly only `run` instead of `run-app`. And skip `-Dglfw`. Windows only, glfw
 
 ### Standalone with vulkan 3D rendering
 `zig build run --build-file ./examples/3d/build.zig -Dglfw`  
-Or alternatively `cd examples/3d` and `zig build run -Dglfw`.
-
-![screenshot](examples/3d/screenshot.png)
+Or alternatively `cd examples/3d` and `zig build run -Dglfw`
