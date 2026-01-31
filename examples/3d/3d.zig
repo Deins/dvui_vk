@@ -92,6 +92,7 @@ pub const DepthBuffer = struct {
 };
 
 pub const AppState = struct {
+    gpa: std.mem.Allocator,
     backend: *DvuiVkBackend.VkBackend,
     render_pass: vk.RenderPass,
     sync: FrameSync,
@@ -200,6 +201,7 @@ pub const AppState = struct {
         errdefer depth_buffer.deinit(b.vkc.device);
 
         return .{
+            .gpa = gpa,
             .backend = b,
             .command_buffers = command_buffers,
             .render_pass = render_pass,
@@ -451,7 +453,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 }
 
 pub const max_frames_in_flight = 2;
-pub const vsync = false;
+pub var vsync = false;
 
 pub fn msaaBits(vkc: VkContext, desired_msaa: vk.SampleCountFlags) vk.SampleCountFlags {
     const limits = vkc.physical_device.properties.limits;
@@ -549,6 +551,15 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
         const m = dvui.box(@src(), .{ .dir = .horizontal }, .{ .expand = .horizontal, .background = true, .gravity_y = 0 });
         defer m.deinit();
         _ = dvui.checkbox(@src(), &dvui.Examples.show_demo_window, "Show dvui demo", .{});
+
+        if (dvui.checkbox(@src(), &vsync, "vsync", .{})) {
+            const alloc = g_app_state.gpa;
+            if (alloc.dupe(vk.PresentModeKHR, if (!vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr })) |new| {
+                alloc.free(ctx.swapchain_state.?.options.desired_present_modes);
+                ctx.swapchain_state.?.options.desired_present_modes = new;
+                ctx.recreate_swapchain_requested = true;
+            } else |_| vsync = !vsync;
+        }
     }
 
     {
