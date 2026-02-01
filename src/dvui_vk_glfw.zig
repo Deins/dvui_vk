@@ -64,8 +64,7 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
 }
 
 pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
-    const vk_alloc = null; // @ptrCast(self.backend.vkc.alloc) would be nice, but its not initialized yet
-    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, vk_alloc, @ptrCast(&self.surface));
+    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, @ptrCast(self.backend.vkc.alloc), @ptrCast(&self.surface));
     return res == .success;
 }
 pub const createVkSurface = createVkSurfaceGLFW;
@@ -321,7 +320,7 @@ pub fn main() !void {
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
     defer b.vkc.device.destroyRenderPass(render_pass, null);
 
-    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
     defer sync.deinit(gpa, b.vkc.device);
 
     const command_buffers = try createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);

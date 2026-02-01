@@ -285,11 +285,10 @@ pub const WindowContext = struct {
             render_pass: vk.RenderPass,
         ) !bool {
             const vkc = ctx.backend.vkc;
-            const device = vkc.device;
             if (swapchain_state.framebuffers.len == 0) {
                 try swapchain_state.createFramebuffers(
                     gpa,
-                    device,
+                    vkc,
                     shared_attachments,
                     render_pass,
                 );
@@ -341,11 +340,12 @@ pub const WindowContext = struct {
         fn createFramebuffers(
             swapchain_state: *@This(),
             allocator: std.mem.Allocator,
-            device: vk.DeviceProxy,
+            vkc: VkContext,
             shared_attachments: []const vk.ImageView,
             render_pass: vk.RenderPass,
         ) !void {
-            const vk_alloc = null;
+            const device = vkc.device;
+            const vk_alloc = vkc.alloc;
             for (swapchain_state.framebuffers) |fb| device.destroyFramebuffer(fb, vk_alloc);
             const extent: vk.Extent2D = swapchain_state.swapchain.extent;
             const image_count: u32 = swapchain_state.swapchain.image_count;
@@ -501,9 +501,9 @@ pub const FrameSync = struct {
         /// CPU waits for GPU to be able to reuse frame resources
         in_flight_fence: vk.Fence = .null_handle,
 
-        const vk_alloc = null;
-
-        pub fn init(device: vk.DeviceProxy) !Frame {
+        pub fn init(vkc: VkContext) !Frame {
+            const device = vkc.device;
+            const vk_alloc = vkc.alloc;
             const semaphore_info = vk.SemaphoreCreateInfo{};
             const fence_info = vk.FenceCreateInfo{ .flags = .{ .signaled_bit = true } };
             const image_available = try device.createSemaphore(&semaphore_info, vk_alloc);
@@ -533,12 +533,12 @@ pub const FrameSync = struct {
     pub fn init(
         alloc: std.mem.Allocator,
         max_frames: u8,
-        device: vk.DeviceProxy,
+        vkc: VkContext,
     ) !@This() {
         const items = try alloc.alloc(Frame, max_frames);
         for (items) |*it| it.* = .{};
-        errdefer for (items) |it| it.deinit(device);
-        for (items) |*it| it.* = try Frame.init(device);
+        errdefer for (items) |it| it.deinit(vkc.device);
+        for (items) |*it| it.* = try Frame.init(vkc);
         return .{ .items = items };
     }
 

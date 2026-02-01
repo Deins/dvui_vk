@@ -32,11 +32,12 @@ pub const DepthBuffer = struct {
     view: vk.ImageView,
     memory: vk.DeviceMemory,
     size: vk.Extent2D,
-    const vk_alloc = null;
     const format = vk.Format.d32_sfloat;
 
-    pub fn init(dev: vk.DeviceProxy, size: vk.Extent2D, device_local_mem_idx: u32) !DepthBuffer {
+    pub fn init(vkc: VkContext, size: vk.Extent2D, device_local_mem_idx: u32) !DepthBuffer {
         // createImage( vk::ImageTiling::eOptimal, vk::ImageUsageFlagBits::eDepthStencilAttachment, vk::MemoryPropertyFlagBits::eDeviceLocal, depthImage, depthImageMemory
+        const dev = vkc.device;
+        const vk_alloc = vkc.alloc;
         const image = try dev.createImage(&.{
             .image_type = .@"2d",
             .format = format,
@@ -84,7 +85,9 @@ pub const DepthBuffer = struct {
             .size = size,
         };
     }
-    pub fn deinit(self: @This(), dev: vk.DeviceProxy) void {
+    pub fn deinit(self: @This(), vkc: VkContext) void {
+        const dev = vkc.device;
+        const vk_alloc = vkc.alloc;
         dev.destroyImageView(self.view, vk_alloc);
         dev.destroyImage(self.image, vk_alloc);
         dev.freeMemory(self.memory, vk_alloc);
@@ -190,11 +193,11 @@ pub const AppState = struct {
             .max_frames_in_flight = max_frames_in_flight,
         });
 
-        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
         errdefer sync.deinit(gpa, b.vkc.device);
 
         const depth_buffer = try DepthBuffer.init(
-            b.vkc.device,
+            b.vkc,
             .{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
             b.renderer.?.device_local_mem_idx,
         );
@@ -453,7 +456,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 }
 
 pub const max_frames_in_flight = 2;
-pub var vsync = false;
+pub var vsync = true;
 
 pub fn msaaBits(vkc: VkContext, desired_msaa: vk.SampleCountFlags) vk.SampleCountFlags {
     const limits = vkc.physical_device.properties.limits;
@@ -838,9 +841,9 @@ pub fn acquireImageMaybeRecreate(
     const image_index = blk: while (true) {
         if (try swapchain_state.maybeResize(ctx)) {
             // recreate depth
-            g_app_state.depth_buffer.deinit(device);
+            g_app_state.depth_buffer.deinit(vkc);
             g_app_state.depth_buffer = try DepthBuffer.init(
-                vkc.device,
+                vkc,
                 ctx.swapchain_state.?.swapchain.extent,
                 device_local_mem_idx,
             );
