@@ -717,8 +717,10 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     }
 
     // sleep when nothing to do
-    const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
-    ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);
+    if (@hasDecl(dvui.backend, "waitEventTimeout")) {
+        const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
+        ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);
+    }
 }
 
 pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {

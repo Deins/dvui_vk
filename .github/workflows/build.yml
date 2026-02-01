@@ -17,7 +17,9 @@ jobs:
         with:
           version: 0.15.2
       - name: Build with GLFW
+        shell: bash
         run: |
+          set -euo pipefail
           zig build -Dglfw
           zig build --build-file ./examples/3d/build.zig -Dglfw
           ls ./zig-out/bin
@@ -31,7 +33,9 @@ jobs:
         with:
           version: 0.15.2
       - name: Build
+        shell: bash
         run: |
+          set -euo pipefail
           zig build
           zig build --build-file ./examples/3d/build.zig
           ls ./zig-out/bin
