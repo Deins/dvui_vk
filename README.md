@@ -35,18 +35,16 @@ Backend is separated in parts:
     * When using `sleep when inactive` we can get occasional `Swapchain image was presented but was not re-acquired` validation error. Cant be caught when rendering at full frame rate.
 
 ## Build & Run
-Vulkan SDK is recommended for development to be able to run validation layers etc. However it is not required and will still compile with compilation message `VulkanSDK not found`.
-If its unexpected check that `VULKAN_SDK` is correctly defined in your environment.
-
 ```sh
 zig build run-app -Doptimize=ReleaseFast -Dglfw
 ```
+Vulkan SDK is optional but recommended for development (to be able to run vulkan validation layers etc). To use vulkan sdk make sure `VULKAN_SDK` environment variable is correctly defined. 
 
-Shaders when modified can be recompiled by passing `-Dslangc` ([slangc](https://github.com/shader-slang/slang/releases) comes packaged with vulkan SDK or needs to be installed manually).
-
-### Standalone example
-Similarly only `run` instead of `run-app`. And skip `-Dglfw`. Windows only, glfw not implemented. See 3d example (idea the same).
+Shaders when modified need be recompiled by adding `-Dslangc` to build command. ([slangc](https://github.com/shader-slang/slang/releases) comes packaged with vulkan SDK or needs to be installed separately).
 
 ### Standalone with vulkan 3D rendering
 `zig build run --build-file ./examples/3d/build.zig -Dglfw`  
 Or alternatively `cd examples/3d` and `zig build run -Dglfw`
+
+### Standalone example
+Similarly as others only `run` instead of `run-app`. And skip `-Dglfw` - windows native only.
