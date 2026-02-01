@@ -6,10 +6,9 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui.git#0ca4d5c7a7915ee53a7f69c7facb8b48b7807f40",
-            .hash = "dvui-0.4.0-dev-AQFJmc3h2gBHoPtLm2KO1NEWuqV-kPm1cusWeY6OkHKf",
+            .url = "git+https://github.com/david-vanderson/dvui.git#feac7d70ef65fef7fb5eac7de6527d8a53302a8e",
+            .hash = "dvui-0.4.0-dev-AQFJmV7m2gCdX5UXEu3pEGm86D-QTST9W8iaB4I5aY6C",
         },
-        // dvui dependencies
 
         .vulkan = .{
             //.path = "vulkan-zig",
@@ -35,8 +34,8 @@
         },
         .glfw_build = .{
             // .path = "glfw.zig",
-            .url = "git+https://github.com/tiawl/glfw.zig#2815c42d2a0a7e7936bc2094b0547e53ec2b484d",
-            .hash = "glfw_zig-1.0.0-NrvYo-bXGQBIe3316R8aIKJrwvQvdeIet-hYcINGNa5g",
+            .url = "git+https://github.com/tiawl/glfw.zig#23a6cf3b4691d24c7a026614d86c3c3bc5985642",
+            .hash = "glfw_zig-1.0.0-NrvYo-PXGQCPoUiRdRv27aKZl34nVAWPbhUPs1u0qoLO",
             .lazy = true,
         },
 
