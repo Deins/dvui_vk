@@ -33,9 +33,9 @@ pub const AppState = struct {
         const window_context = iw.window;
 
         const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-        errdefer b.vkc.device.destroyRenderPass(render_pass, null);
+        errdefer b.vkc.device.destroyRenderPass(render_pass, b.vkc.alloc);
 
-        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
         errdefer sync.deinit(gpa, b.vkc.device);
 
         const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
@@ -63,7 +63,7 @@ pub const AppState = struct {
         defer vk_dll.deinit();
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
-        defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
+        defer self.backend.vkc.device.destroyRenderPass(self.render_pass, self.backend.vkc.alloc);
         defer self.sync.deinit(gpa, self.backend.vkc.device);
         defer gpa.free(self.command_buffers);
     }

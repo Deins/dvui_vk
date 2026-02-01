@@ -324,9 +324,9 @@ pub fn main() !void {
     const window_context = iw.window;
 
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-    defer b.vkc.device.destroyRenderPass(render_pass, null);
+    defer b.vkc.device.destroyRenderPass(render_pass, b.vkc.alloc);
 
-    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
     defer sync.deinit(gpa, b.vkc.device);
 
     const command_buffers = try createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
