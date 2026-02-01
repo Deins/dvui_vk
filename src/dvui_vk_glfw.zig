@@ -64,7 +64,8 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
 }
 
 pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
-    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, @ptrCast(self.backend.vkc.alloc), @ptrCast(&self.surface));
+    const vk_alloc = null; //  @ptrCast(self.backend.vkc.alloc)
+    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, vk_alloc, @ptrCast(&self.surface));
     return res == .success;
 }
 pub const createVkSurface = createVkSurfaceGLFW;
