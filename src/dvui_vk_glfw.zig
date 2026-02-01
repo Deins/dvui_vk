@@ -64,7 +64,7 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
 }
 
 pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
-    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, self.backend.vkc.alloc, @ptrCast(&self.surface));
+    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, @ptrCast(self.backend.vkc.alloc), @ptrCast(&self.surface));
     return res == .success;
 }
 pub const createVkSurface = createVkSurfaceGLFW;
@@ -320,7 +320,7 @@ pub fn main() !void {
     const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
     defer b.vkc.device.destroyRenderPass(render_pass, null);
 
-    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc.device);
+    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
     defer sync.deinit(gpa, b.vkc.device);
 
     const command_buffers = try createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
@@ -376,10 +376,12 @@ pub fn main() !void {
 
 /// Window damage and refresh
 pub fn refreshCB(window: *glfw.Window) callconv(.c) void {
+    disable_wait_event = true;
     const ctx = glfwWindowContext(window);
     if (dvui.App.get()) |app| {
         paint(app, &g_app_state, ctx) catch |err| slog.debug("paint on refresh failed: {}", .{err});
     } else slog.debug("Can't refresh - missing dvui.getApp()", .{});
+    disable_wait_event = false;
 }
 
 pub fn resizeCB(window: *glfw.Window, w: c_int, h: c_int) callconv(.c) void {
@@ -396,6 +398,29 @@ pub fn resizeCB(window: *glfw.Window, w: c_int, h: c_int) callconv(.c) void {
 //
 pub fn glfwWindowContext(win: *glfw.Window) *WindowContext {
     return @ptrCast(@alignCast(glfw.getWindowUserPointer(win)));
+}
+
+pub var disable_wait_event: bool = false;
+/// Return true if interrupted by event
+pub fn waitEventTimeout(self: *@This(), timeout_micros: u32) !bool {
+    // at least on windows when rendering from damage callback waitEvents can get stuck forever, so it must be disabled
+    if (disable_wait_event or get(self).recreate_swapchain_requested) return true;
+
+    if (timeout_micros == std.math.maxInt(u32)) {
+        glfw.waitEvents();
+        return true;
+    }
+
+    if (timeout_micros > 0) {
+        // wait with a timeout
+        const timeout = @min((timeout_micros + 999) / 1000, std.math.maxInt(c_int));
+        const timeout_s = @as(f64, @floatFromInt(timeout)) / std.time.us_per_s;
+        glfw.waitEventsTimeout(timeout_s);
+        return true;
+    }
+
+    // don't wait at all
+    return false;
 }
 
 pub fn registerDvuiIO(win: *glfw.Window) void {

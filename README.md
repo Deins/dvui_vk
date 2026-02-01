@@ -21,17 +21,18 @@ Backend is separated in parts:
     * [dvui_vk_glfw.zig](./src/dvui_vk_glfw.zig) - backend based on glfw for windowing and input. Use `-Dglfw` build flag to enable.
     * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - additional common stuff used by all backends.
 
-### todo - not yet implemented 🚧
+### todo, known issues
 * Rendering:
-    * textureRead()
+    * textureRead() not implemented
     * option to pass in general purpose gpu memory allocator for textures
     * linear color space frame-buffers. (easily switchable with source modifications, but tricky to expose).
 * App/Platform functionality:
-    * Variable frame rate (sleeping when inactive)
+    * should try to get free-type running for dvui text rendering instead of default stb-truetype. As text rendering quality is not as good. 
     * Touch events
-    * Other misc platform functions such as openURL, clipboard etc.
-* Misc/known issues:
-    * windows: app swapchain resize is not synced to window resize causing small visual jerks. (no easy fix - general issue with vulkan on windows, maybe some hackery is possible to use dx11/12 swapchain instead of vulkan one). standalone example: doesn't have realtime resize implemented.
+    * for windows native backend:
+        * Sleep when inactive is not implemented.
+        * Some misc platform functions such as openURL, clipboard etc.
+    * When using `sleep when inactive` we can get occasional `Swapchain image was presented but was not re-acquired` validation error. Cant be caught when rendering at full frame rate.
 
 ## Build & Run
 Vulkan SDK is recommended for development to be able to run validation layers etc. However it is not required and will still compile with compilation message `VulkanSDK not found`.

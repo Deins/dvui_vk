@@ -457,6 +457,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 
 pub const max_frames_in_flight = 2;
 pub var vsync = true;
+pub var sleep_when_no_events = false;
 
 pub fn msaaBits(vkc: VkContext, desired_msaa: vk.SampleCountFlags) vk.SampleCountFlags {
     const limits = vkc.physical_device.properties.limits;
@@ -539,10 +540,12 @@ pub fn main() !void {
 
 /// Window damage and refresh
 pub fn refreshCB(window: *glfw.Window) callconv(.c) void {
+    DvuiVkBackend.disable_wait_event = true; // when rendering from damage callback wait for event must be disabled!
     if (uses_glfw) {
         const ctx: *DvuiVkBackend.WindowContext = @ptrCast(@alignCast(glfw.getWindowUserPointer(window)));
         paint(&g_app_state, ctx) catch {};
     }
+    DvuiVkBackend.disable_wait_event = false;
 }
 pub fn win32DamageRefresh(ctx: *DvuiVkBackend.WindowContext) void {
     paint(&g_app_state, ctx) catch {};
@@ -563,6 +566,8 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
                 ctx.recreate_swapchain_requested = true;
             } else |_| vsync = !vsync;
         }
+
+        if (dvui.checkbox(@src(), &sleep_when_no_events, "sleep when no events", .{})) {}
     }
 
     {
@@ -625,12 +630,13 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     cmd.setDepthTestEnableEXT(.false);
     cmd.setDepthWriteEnableEXT(.false);
 
+    var end_micros: ?u32 = null;
     if (true) { // draw dvui
         b.renderer.?.beginFrame(cmd.handle, extent);
         // defer _ = b.renderer.?.endFrame();
 
         // beginWait coordinates with waitTime below to run frames only when needed
-        const nstime = ctx.dvui_window.beginWait(false);
+        const nstime = ctx.dvui_window.beginWait(ctx.dvui_interrupted);
 
         // marks the beginning of a frame for dvui, can call dvui functions after thisz
         try ctx.dvui_window.begin(nstime);
@@ -639,7 +645,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
         // marks end of dvui frame, don't call dvui functions after this
         // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
-        _ = try ctx.dvui_window.end(.{});
+        end_micros = try ctx.dvui_window.end(.{});
 
         // cursor management
         // TODO: reenable
@@ -661,6 +667,12 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         slog.err("present failed!", .{});
     }
     // slog.debug("frame done", .{});
+
+    // sleep when nothing to do
+    if (@hasDecl(dvui.backend, "waitEventTimeout") and sleep_when_no_events) {
+        const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
+        ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);
+    } else ctx.dvui_interrupted = true;
 }
 
 fn createDvuiPipeline(

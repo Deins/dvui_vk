@@ -152,6 +152,7 @@ pub const VkBackend = struct {
 pub const WindowContext = struct {
     backend: *VkBackend, // kindof unnecessary, for common cases single backend could be just global
     dvui_window: dvui.Window,
+    dvui_interrupted: bool = true, // interrupt dvui sleep if its used
     received_close: bool = false,
     /// requests swapchain recreate with then latest_pixel_size. executed & flag reset on next image is acquire
     recreate_swapchain_requested: bool = false,
@@ -649,10 +650,6 @@ pub const AppState = struct {
     command_buffers: []vk.CommandBuffer,
 };
 
-pub fn hasEvent() bool {
-    return false; // TODO: implement
-}
-
 pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     const b = ctx.backend;
     const gpa = b.gpa;
@@ -692,14 +689,13 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     // defer _ = b.renderer.?.endFrame();
 
     // beginWait coordinates with waitTime below to run frames only when needed
-    const nstime = ctx.dvui_window.beginWait(hasEvent());
-
+    const nstime = ctx.dvui_window.beginWait(ctx.dvui_interrupted);
     // marks the beginning of a frame for dvui, can call dvui functions after thisz
     try ctx.dvui_window.begin(nstime);
     const res = try app.frameFn();
     // marks end of dvui frame, don't call dvui functions after this
     // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
-    _ = try ctx.dvui_window.end(.{});
+    const end_micros = try ctx.dvui_window.end(.{});
 
     if (res != .ok) ctx.received_close = true;
 
@@ -719,6 +715,10 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     )) {
         // should_recreate_swapchain = true;
     }
+
+    // sleep when nothing to do
+    const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
+    ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);
 }
 
 pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
