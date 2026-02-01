@@ -22,9 +22,6 @@ const VkContext = DvuiVkBackend.VkContext;
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
 const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
-const zig_logo_glb align(4) = @embedFile("zig_logo.glb").*;
-const vk_logo_glb align(4) = @embedFile("vulkan_logo.glb").*;
-
 const Mat4 = zm.Matrix(4, 4, f32, .{});
 
 pub const DepthBuffer = struct {
@@ -298,9 +295,9 @@ pub const Scene = struct {
         });
         errdefer pip_cache.deinit(vkc);
 
-        const zig_model = try Model.initFromBuffer(alloc, &zig_logo_glb, vkc);
+        const zig_model = try Model.initFromFile(alloc, vkc, "zig_logo.glb");
         errdefer zig_model.deinit(alloc, vkc);
-        const vk_model = try Model.initFromBuffer(alloc, &vk_logo_glb, vkc);
+        const vk_model = try Model.initFromFile(alloc, vkc, "vulkan_logo.glb");
         errdefer vk_model.deinit(alloc, vkc);
         // create pipelines at load time
         for (zig_model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(zig_model, mesh, vkc);
@@ -889,37 +886,6 @@ pub fn acquireImageMaybeRecreate(
     return image_index; // autofix
 }
 
-const VertexBindings = struct {
-    // vertex layut
-    const binding_description = [_]vk.VertexInputBindingDescription{.{
-        .binding = 0,
-        .stride = @sizeOf(f32) * 4,
-        .input_rate = .vertex,
-    }};
-
-    // shader
-    const attribute_description = [_]vk.VertexInputAttributeDescription{
-        .{
-            .binding = 0,
-            .location = 0,
-            .format = .r32g32b32a32_sfloat,
-            .offset = 0, //@offsetOf(Vertex, "pos"),
-        },
-        // .{
-        //     .binding = 0,
-        //     .location = 1,
-        //     .format = .r8g8b8a8_unorm,
-        //     .offset = @offsetOf(Vertex, "col"),
-        // },
-        // .{
-        //     .binding = 0,
-        //     .location = 2,
-        //     .format = .r32g32_sfloat,
-        //     .offset = @offsetOf(Vertex, "uv"),
-        // },
-    };
-};
-
 pub const Model = struct {
     dev_mem: vk.DeviceMemory = .null_handle,
     buffer: vk.Buffer = vk.Buffer.null_handle,
@@ -975,6 +941,18 @@ pub const Model = struct {
             dev.cmdDrawIndexed(cmdbuf, @intCast(self.indices_len), 1, 0, 0, 0);
         }
     };
+
+    pub fn initFromFile(
+        alloc: std.mem.Allocator,
+        vkc: VkContext,
+        relative_path: []const u8,
+    ) !Model {
+        const f = try std.fs.cwd().openFile(relative_path, .{});
+        defer f.close();
+        const content = try f.readToEndAllocOptions(alloc, 1024 * 1024 * 128, 1024 * 1024, std.mem.Alignment.@"4", null);
+        defer alloc.free(content);
+        return try initFromBuffer(alloc, content, vkc);
+    }
 
     pub fn initFromBuffer(alloc: std.mem.Allocator, gltb_content: []align(4) const u8, vkc: VkContext) !Model {
         const dev = vkc.device;

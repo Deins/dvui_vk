@@ -70,7 +70,9 @@ pub fn build(b: *Build) !void {
     //     exe_standalone.subsystem = .Windows;
     // }
     b.installArtifact(exe_standalone);
-    b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
+    const run = b.addRunArtifact(exe_standalone);
+    run.cwd = .{ .src_path = .{ .owner = b, .sub_path = "." } };
+    b.step("run", "Run demo").dependOn(&run.step);
 
     { // Shaders
         const slangc = b.option(bool, "slangc", "Compile slang shaders") orelse false;
