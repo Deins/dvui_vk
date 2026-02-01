@@ -722,12 +722,13 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
 }
 
 pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
-    if (builtin.os.tag == .windows) {
-        // precaution as otherwise it can open files etc. which can get hairy from security perspective
-        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) {
-            return error.BackendError;
-        }
+    // precaution as this runs through shell which can get hairy from security perspective
+    if (!std.ascii.startsWithIgnoreCase(url, "http://") and !std.ascii.startsWithIgnoreCase(url, "https://")) {
+        return error.BackendError;
+    }
+    _ = std.Uri.parse(url) catch return error.BackendError; // another security check
 
+    if (builtin.os.tag == .windows) {
         const Win = struct {
             pub extern "shell32" fn ShellExecuteW(
                 hwnd: ?std.os.windows.HWND,
@@ -758,6 +759,15 @@ pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
             return error.BackendError;
         }
         return;
+    } else if (builtin.os.tag == .linux) {
+        // TODO: review, this can block
+        const open_cmd = "xdg-open";
+        var cmd = std.process.Child.init(&[_][]const u8{ open_cmd, url }, arena);
+        const term = cmd.spawnAndWait() catch |err| {
+            slog.warn("openURL: failed: {}", .{err});
+            return error.BackendError;
+        };
+        if (term == .Exited and term.Exited == 0) return; // success
     }
     return error.BackendError;
 }
