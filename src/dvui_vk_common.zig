@@ -720,3 +720,44 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
         // should_recreate_swapchain = true;
     }
 }
+
+pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
+    if (builtin.os.tag == .windows) {
+        // precaution as otherwise it can open files etc. which can get hairy from security perspective
+        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) {
+            return error.BackendError;
+        }
+
+        const Win = struct {
+            pub extern "shell32" fn ShellExecuteW(
+                hwnd: ?std.os.windows.HWND,
+                lpOperation: ?[*:0]const u16,
+                lpFile: ?[*:0]const u16,
+                lpParameters: ?[*:0]const u16,
+                lpDirectory: ?[*:0]const u16,
+                nShowCmd: i32,
+            ) callconv(.winapi) ?std.os.windows.HINSTANCE;
+            pub extern "ole32" fn CoInitialize(
+                pvReserved: ?*anyopaque,
+            ) callconv(.winapi) std.os.windows.HRESULT;
+            pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
+        };
+
+        if (Win.CoInitialize(null) != 0) return error.BackendError;
+        defer Win.CoUninitialize();
+        const wurl = std.unicode.utf8ToUtf16LeAllocZ(arena, url) catch |err| return switch (err) {
+            error.OutOfMemory => error.OutOfMemory,
+            else => error.BackendError,
+        };
+        defer arena.free(wurl);
+
+        const SW_SHOWNORMAL = 1;
+        const rc = Win.ShellExecuteW(null, null, @ptrCast(wurl), null, null, SW_SHOWNORMAL);
+        if (@intFromPtr(rc) <= 32) {
+            slog.err("Failed to open url! rc: {any}; last_err: {}", .{ @intFromPtr(rc), std.os.windows.GetLastError() });
+            return error.BackendError;
+        }
+        return;
+    }
+    return error.BackendError;
+}

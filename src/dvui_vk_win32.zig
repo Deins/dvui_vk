@@ -155,12 +155,14 @@ pub fn sleep(_: ContextHandle, ns: u64) void {
 /// arg is cleared before `dvui.Window.begin` is called next, useful for any
 /// temporary allocations needed only for this frame.
 pub fn begin(context_handle: ContextHandle, arena: std.mem.Allocator) GenericError!void {
+    get(context_handle).arena = arena;
     context_handle.renderer().begin(arena, context_handle.pixelSize());
 }
 
 /// Called during `dvui.Window.end` before freeing any memory for the current frame.
 pub fn end(context_handle: ContextHandle) GenericError!void {
     context_handle.renderer().end();
+    get(context_handle).arena = undefined;
 }
 
 /// Return size of the window in physical pixels.  For a 300x200 retina
@@ -253,14 +255,13 @@ pub fn clipboardTextSet(self: ContextHandle, text: []const u8) GenericError!void
 /// Open URL in system browser
 pub fn openURL(self: ContextHandle, url: []const u8, new_window: bool) GenericError!void {
     _ = new_window; // autofix
-    _ = self; // autofix
-    _ = url; // autofix
+    return dvui_vk_common.openURL(get(self).arena, url);
 }
 
 /// Get the preferredColorScheme if available
 pub fn preferredColorScheme(self: ContextHandle) ?dvui.enums.ColorScheme {
     _ = self; // autofix
-    return null;
+    return dvui.Backend.Common.windowsGetPreferredColorScheme();
 }
 
 /// Show/hide the cursor.
