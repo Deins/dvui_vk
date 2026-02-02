@@ -37,7 +37,7 @@ const texture_tracing = false; // tace leaks and usage
 pub const InitOptions = struct {
     dev: vk.DeviceProxy,
     pdev: vk.PhysicalDevice,
-    mem_props: vk.PhysicalDeviceMemoryProperties,
+    memory: VkMemory,
     /// render pass from which renderer will be used
     render_pass: vk.RenderPass,
     /// optional vulkan host side allocator
@@ -79,6 +79,57 @@ pub const InitOptions = struct {
         const vtx_space = std.mem.alignForward(u32, s.max_vertices_per_frame * @sizeOf(dvui.Vertex), vk_alignment);
         const idx_space = std.mem.alignForward(u32, s.max_indices_per_frame * @sizeOf(Indice), vk_alignment);
         return s.max_frames_in_flight * (vtx_space + idx_space);
+    }
+};
+
+pub const VkMemory = struct {
+    /// vulkan memory directly read/writeable by host. Usually ram that is streamed on demand by gpu. Very limited amount
+    host_vis: u32,
+    /// gpu dedicated memory, or if gpu has none same as host_vis
+    device_local: u32,
+    /// flag indicating when memory can be modified without flushing it
+    host_coherent: bool,
+
+    /// Returns true for integrated GPUs etc. where gpu shares memory with main memory and it basically doesn't have its own  dedicated local mem
+    pub inline fn sharedMem(self: @This()) bool {
+        return self.host_vis == self.host_coherent;
+    }
+
+    pub fn init(mem_props: vk.PhysicalDeviceMemoryProperties) ?VkMemory {
+        var host_coherent: bool = false;
+        const host_vis_mem_type_index: u32 = blk: {
+            // device local, host visible
+            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
+                if (mem_type.property_flags.device_local_bit and mem_type.property_flags.host_visible_bit) {
+                    host_coherent = mem_type.property_flags.host_coherent_bit;
+                    // slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
+                    break :blk @truncate(i);
+                };
+            // not device local
+            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
+                if (mem_type.property_flags.host_visible_bit) {
+                    host_coherent = mem_type.property_flags.host_coherent_bit;
+                    slog.info("chosen host_visible_mem is NOT device local - Are we running on integrated graphics?", .{});
+                    slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
+                    break :blk @truncate(i);
+                };
+            return null;
+        };
+
+        const device_local_mem_idx: u32 = blk: {
+            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
+                if (mem_type.property_flags.device_local_bit and !mem_type.property_flags.host_visible_bit) {
+                    // slog.debug("chosen device local mem: {} {}", .{ i, mem_type });
+                    break :blk @truncate(i);
+                };
+            break :blk host_vis_mem_type_index;
+        };
+
+        return .{
+            .host_vis = host_vis_mem_type_index,
+            .device_local = device_local_mem_idx,
+            .host_coherent = host_coherent,
+        };
     }
 };
 
@@ -203,42 +254,13 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     // TODO: FIXME: in multiple places here in this function we will leak if error gets thrown
     const dev = opt.dev;
     // Memory
-    // host visible
-    var host_coherent: bool = false;
-    const host_vis_mem_type_index: u32 = blk: {
-        // device local, host visible
-        for (opt.mem_props.memory_types[0..opt.mem_props.memory_type_count], 0..) |mem_type, i|
-            if (mem_type.property_flags.device_local_bit and mem_type.property_flags.host_visible_bit) {
-                host_coherent = mem_type.property_flags.host_coherent_bit;
-                // slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
-                break :blk @truncate(i);
-            };
-        // not device local
-        for (opt.mem_props.memory_types[0..opt.mem_props.memory_type_count], 0..) |mem_type, i|
-            if (mem_type.property_flags.host_visible_bit) {
-                host_coherent = mem_type.property_flags.host_coherent_bit;
-                slog.info("chosen host_visible_mem is NOT device local - Are we running on integrated graphics?", .{});
-                slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
-                break :blk @truncate(i);
-            };
-        return error.NoSuitableMemoryType;
-    };
     slog.debug("host_vis allocation size: {Bi}", .{opt.hostVisibleMemSize()});
     const host_visible_mem = try dev.allocateMemory(&.{
         .allocation_size = opt.hostVisibleMemSize(),
-        .memory_type_index = host_vis_mem_type_index,
+        .memory_type_index = opt.memory.host_vis,
     }, opt.vk_alloc);
     errdefer dev.freeMemory(host_visible_mem, opt.vk_alloc);
     const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..opt.hostVisibleMemSize()];
-    // device local mem
-    const device_local_mem_idx: u32 = blk: {
-        for (opt.mem_props.memory_types[0..opt.mem_props.memory_type_count], 0..) |mem_type, i|
-            if (mem_type.property_flags.device_local_bit and !mem_type.property_flags.host_visible_bit) {
-                // slog.debug("chosen device local mem: {} {}", .{ i, mem_type });
-                break :blk @truncate(i);
-            };
-        break :blk host_vis_mem_type_index;
-    };
     // Memory sub-allocation into FrameData
     const frames = try alloc.alloc(FrameData, opt.max_frames_in_flight);
     errdefer alloc.free(frames);
@@ -383,11 +405,11 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .render_target_pipeline = try createPipeline(dev, pipeline_layout, render_target_pass, opt.vk_alloc),
         .pipeline = pipeline,
         .pipeline_layout = pipeline_layout,
-        .host_vis_mem_idx = host_vis_mem_type_index,
+        .host_vis_mem_idx = opt.memory.host_vis,
         .host_vis_mem = host_visible_mem,
         .host_vis_data = host_vis_data,
-        .host_vis_coherent = host_coherent,
-        .device_local_mem_idx = device_local_mem_idx,
+        .host_vis_coherent = opt.memory.host_coherent,
+        .device_local_mem_idx = opt.memory.device_local,
         .queue = opt.queue,
         .cpool = opt.comamnd_pool,
         .frames = frames,

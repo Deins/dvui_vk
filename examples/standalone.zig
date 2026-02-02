@@ -46,7 +46,7 @@ pub const AppState = struct {
             .comamnd_pool = b.vkc.cmd_pool,
             .queue = b.vkc.graphics_queue.handle,
             .pdev = b.vkc.physical_device.handle,
-            .mem_props = b.vkc.physical_device.memory_properties,
+            .memory = DvuiVkBackend.VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
             .render_pass = render_pass,
             .max_frames_in_flight = max_frames_in_flight,
         });
