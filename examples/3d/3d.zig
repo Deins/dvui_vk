@@ -967,9 +967,19 @@ pub const Model = struct {
             for (gltf.data.buffers) |b| s += b.byte_length;
             break :blk s;
         };
+
+        // support only glb single buffer
+        const buf = try dev.createBuffer(&.{
+            .size = mem_size,
+            .usage = vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        }, vk_alloc);
+        const mem_req = dev.getBufferMemoryRequirements(buf);
+
+        // we treat gltf.mesh.primitives as meshes
         // TODO: for static geometry using host_vis_mem is bad - implement staging to device local mem instead
         const host_visible_mem = try dev.allocateMemory(&.{
-            .allocation_size = mem_size,
+            .allocation_size = mem_req.size,
             .memory_type_index = g_app_state.backend.renderer.?.host_vis_mem_idx,
         }, vk_alloc);
         errdefer dev.freeMemory(host_visible_mem, vk_alloc);
@@ -977,16 +987,8 @@ pub const Model = struct {
         if (gltf.glb_binary) |bin| {
             @memcpy(host_vis_data, bin);
         } else return error.Invalid; // TODO: at the moment support only glb with builtin buffer
-
-        // support only glb single buffer
-        const buf = try dev.createBuffer(&.{
-            .size = host_vis_data.len,
-            .usage = vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
-            .sharing_mode = .exclusive,
-        }, vk_alloc);
         try dev.bindBufferMemory(buf, host_visible_mem, 0);
 
-        // we treat gltf.mesh.primitives as meshes
         const mesh_count: usize = blk: {
             var count: usize = 0;
             for (gltf.data.meshes) |m| count += m.primitives.len;
