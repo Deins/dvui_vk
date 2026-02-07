@@ -33,6 +33,7 @@ Backend is separated in parts:
         * Sleep when inactive is not implemented.
         * Some misc platform functions such as openURL, clipboard etc.
     * When using `sleep when inactive` we can get occasional `Swapchain image was presented but was not re-acquired` validation error. Cant be caught when rendering at full frame rate.
+    * max frames in flight must match swapchain image count, otherwise can get validation errors. Safe value is 3. In future max frames in flight should be completely decoupled from swapchain image count.
 
 ## Build & Run
 ```sh

@@ -39,7 +39,11 @@ pub const InitOptions = struct {
     pdev: vk.PhysicalDevice,
     memory: VkMemory,
     /// render pass from which renderer will be used
-    render_pass: vk.RenderPass,
+    /// or in case of vulkan >= 1.3 specify use dynamic rendering instead
+    render_pass: union(enum) {
+        dynamic: vk.PipelineRenderingCreateInfo,
+        static: vk.RenderPass,
+    },
     /// optional vulkan host side allocator
     vk_alloc: ?*vk.AllocationCallbacks = null,
 
@@ -179,7 +183,8 @@ current_frame: *FrameData, // points somewhere in frames
 
 /// if set render to render texture instead of default cmdbuf
 render_target: ?vk.CommandBuffer = null,
-render_target_pass: vk.RenderPass,
+render_target_tex: vk.Image = .null_handle,
+render_target_pass: vk.RenderPass, // or null when dynamic rendering enabled
 render_target_pipeline: vk.Pipeline,
 
 dummy_texture: Texture = undefined, // dummy/null white texture
@@ -196,6 +201,12 @@ vtx_overflow_logged: bool = false,
 idx_overflow_logged: bool = false,
 // just for info / dbg
 stats: Stats = .{},
+
+dynamic: vk.PipelineRenderingCreateInfo,
+
+pub inline fn dynamicRendering(s: Self) bool {
+    return s.render_target_pass == .null_handle;
+}
 
 /// for potentially multi threaded shared resources, lock callbacks can be set that will be called
 const LockCallbacks = struct {
@@ -253,6 +264,7 @@ const FrameData = struct {
 pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
     // TODO: FIXME: in multiple places here in this function we will leak if error gets thrown
     const dev = opt.dev;
+    const dynamic_rendering = std.meta.activeTag(opt.render_pass) == .dynamic;
     // Memory
     slog.debug("host_vis allocation size: {Bi}", .{opt.hostVisibleMemSize()});
     const host_visible_mem = try dev.allocateMemory(&.{
@@ -383,12 +395,28 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         },
     };
 
-    const render_target_pass = try createOffscreenRenderPass(dev, img_format);
+    const render_target_pass = if (dynamic_rendering) .null_handle else try createOffscreenRenderPass(dev, img_format);
+    errdefer dev.destroyRenderPass(render_target_pass, opt.vk_alloc);
 
-    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, opt.render_pass, opt.vk_alloc);
+    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, switch (opt.render_pass) {
+        .static => |s| s,
+        .dynamic => .null_handle,
+    }, switch (opt.render_pass) {
+        .static => null,
+        .dynamic => |s| s,
+    }, opt.vk_alloc);
     errdefer if (opt.pipeline == .null_handle) dev.destroyPipeline(pipeline, opt.vk_alloc);
 
+    const render_target_pipeline = try createPipeline(dev, pipeline_layout, render_target_pass, if (render_target_pass == .null_handle) vk.PipelineRenderingCreateInfo{
+        .color_attachment_count = 1,
+        .view_mask = 0,
+        .p_color_attachment_formats = &[_]vk.Format{img_format},
+        .depth_attachment_format = .undefined,
+        .stencil_attachment_format = .undefined,
+    } else null, opt.vk_alloc);
+
     var res: Self = .{
+        .dynamic = if (dynamic_rendering) opt.render_pass.dynamic else undefined,
         .dev = dev,
         .dpool = dpool,
         .pdev = opt.pdev,
@@ -402,7 +430,7 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .textures = try alloc.alloc(Texture, opt.max_textures),
         .destroy_textures = try alloc.alloc(u16, opt.max_textures),
         .render_target_pass = render_target_pass,
-        .render_target_pipeline = try createPipeline(dev, pipeline_layout, render_target_pass, opt.vk_alloc),
+        .render_target_pipeline = render_target_pipeline,
         .pipeline = pipeline,
         .pipeline_layout = pipeline_layout,
         .host_vis_mem_idx = opt.memory.host_vis,
@@ -478,8 +506,9 @@ pub fn beginFrame(self: *Self, cmdbuf: vk.CommandBuffer, framebuffer_size: vk.Ex
 /// Ends current frame
 /// returns command buffer (same one given at init)
 pub fn endFrame(self: *Self) vk.CommandBuffer {
+    if (self.render_target) unreachable;
     const cmdbuf = self.cmdbuf;
-    self.dev.cmdEndRenderPass(cmdbuf);
+    // if (self.dynamicRendering()) self.dev.cmdEndRendering(cmdbuf) else self.dev.cmdEndRenderPass(cmdbuf);
     self.cmdbuf = .null_handle;
     return cmdbuf;
 }
@@ -656,7 +685,7 @@ pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolatio
     };
     errdefer tex.deinit(self);
 
-    tex.framebuffer = dev.createFramebuffer(&.{
+    tex.framebuffer = if (self.dynamicRendering()) .null_handle else dev.createFramebuffer(&.{
         .flags = .{},
         .render_pass = self.render_target_pass,
         .attachment_count = 1,
@@ -710,8 +739,6 @@ pub fn textureFromTarget(self: *Backend, texture_target: dvui.TextureTarget) dvu
 }
 
 pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) GenericError!void {
-    // TODO: all errors are set to unreachable, add handling?
-    const dev = self.dev;
     const srr = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
         .base_mip_level = 0,
@@ -719,18 +746,54 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
         .base_array_layer = 0,
         .layer_count = 1,
     };
-    _ = srr; // autofix
+    // TODO: all errors are set to unreachable, add handling?
+    const dev = self.dev;
 
     if (self.render_target) |cmdbuf| { // finalize previous render target
         self.render_target = null;
-        dev.cmdEndRenderPass(cmdbuf);
+        defer self.render_target_tex = .null_handle;
+        if (self.dynamicRendering()) self.dev.cmdEndRendering(cmdbuf) else self.dev.cmdEndRenderPass(cmdbuf);
+        if (self.dynamicRendering()) { // transition to read only optimal
+            const img_barrier = vk.ImageMemoryBarrier{
+                .src_access_mask = .{ .color_attachment_write_bit = true },
+                .dst_access_mask = .{ .shader_read_bit = true },
+                .old_layout = .color_attachment_optimal,
+                .new_layout = .shader_read_only_optimal,
+                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .image = self.render_target_tex,
+                .subresource_range = srr,
+            };
+            dev.cmdPipelineBarrier(cmdbuf, .{ .color_attachment_output_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+        }
         // TODO: transition to shader_src_optimal
         self.endSingleTimeCommands(cmdbuf) catch unreachable;
         return;
     }
 
     const texture: *Texture = if (dvui_texture_target) |t| @ptrCast(@alignCast(t.ptr)) else return;
+    self.render_target_tex = texture.img;
     const cmdbuf = self.beginSingleTimeCommands() catch unreachable;
+
+    { // transition to color attachment optimal
+        const img_barrier = vk.ImageMemoryBarrier{
+            .old_layout = .undefined,
+            .src_access_mask = .{},
+            .dst_access_mask = .{},
+            .new_layout = .color_attachment_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = self.render_target_tex,
+            .subresource_range = .{
+                .aspect_mask = .{ .color_bit = true },
+                .base_mip_level = 0,
+                .level_count = 1,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+        };
+        dev.cmdPipelineBarrier(cmdbuf, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+    }
 
     const w: f32 = @floatFromInt(self.framebuffer_size.width); // @floatFromInt(tt.fb_size.width)
     const h: f32 = @floatFromInt(self.framebuffer_size.height); // @floatFromInt(tt.fb_size.height)
@@ -748,7 +811,24 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
             .max_depth = 1,
         };
 
-        dev.cmdBeginRenderPass(cmdbuf, &.{
+        if (texture.img_view == .null_handle) unreachable;
+        if (self.dynamicRendering()) dev.cmdBeginRendering(cmdbuf, &.{
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = dvui_texture_target.?.width, .height = dvui_texture_target.?.height } },
+            .view_mask = 0,
+            .layer_count = 1,
+            .color_attachment_count = 1,
+            .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
+                .image_view = texture.img_view,
+                .image_layout = .color_attachment_optimal,
+                .resolve_mode = .{},
+                .resolve_image_view = .null_handle,
+                .resolve_image_layout = .color_attachment_optimal,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+            }},
+            .p_depth_attachment = null,
+        }) else dev.cmdBeginRenderPass(cmdbuf, &.{
             .render_pass = self.render_target_pass,
             .framebuffer = texture.framebuffer,
             .render_area = vk.Rect2D{
@@ -804,8 +884,11 @@ fn createPipeline(
     dev: DeviceProxy,
     layout: vk.PipelineLayout,
     render_pass: vk.RenderPass,
+    dynamic_render_pass: ?vk.PipelineRenderingCreateInfo, // render_pass must be null
     vk_alloc: ?*vk.AllocationCallbacks,
 ) DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
+    if (dynamic_render_pass != null and render_pass != .null_handle) unreachable;
+    if (dynamic_render_pass == null and render_pass == .null_handle) unreachable;
     //  NOTE: VK_KHR_maintenance5 (which was promoted to vulkan 1.4) deprecates ShaderModules.
     // todo: check for extension and then enable
     const ext_m5 = false; // VK_KHR_maintenance5
@@ -932,6 +1015,7 @@ fn createPipeline(
         .subpass = 0,
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
+        .p_next = if (dynamic_render_pass) |s| &s else null,
     };
 
     var pipeline: vk.Pipeline = undefined;
@@ -968,6 +1052,7 @@ fn stageToBuffer(
     try self.dev.bindBufferMemory(buf, mem, mem_offset);
     const data = @as([*]u8, @ptrCast((try self.dev.mapMemory(mem, mem_offset, vk.WHOLE_SIZE, .{})).?))[0..mreq.size];
     @memcpy(data[0..contents.len], contents);
+    defer self.dev.unmapMemory(mem);
     if (!self.host_vis_coherent)
         try self.dev.flushMappedMemoryRanges(1, &.{.{ .memory = mem, .offset = mem_offset, .size = mreq.size }});
     return .{ .buf = buf, .mem = mem };

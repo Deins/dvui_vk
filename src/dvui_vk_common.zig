@@ -169,17 +169,20 @@ pub const WindowContext = struct {
     glfw_win: ?*c_long = null,
 
     pub const SwapchainState = struct {
+        pub const max_images = 4;
         swapchain: vkk.Swapchain,
         images: []vk.Image,
         image_views: []vk.ImageView,
         framebuffers: []vk.Framebuffer = &.{},
         // options for recreate, cached from init or modified before manually recreating swapchain
         options: Options,
+        current_layout: [max_images]vk.ImageLayout = [_]vk.ImageLayout{.undefined} ** max_images, // used only with dynamic_rendering
 
         const Options = struct {
             desired_formats: []const vk.SurfaceFormatKHR = &.{},
             desired_present_modes: []vk.PresentModeKHR = &.{},
             msaa: vk.SampleCountFlags = .{ .@"1_bit" = true },
+            dynamic_rendering: bool = false, // should not be changed after init
         };
 
         pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
@@ -196,6 +199,7 @@ pub const WindowContext = struct {
             );
             errdefer vkc.device.destroySwapchainKHR(swapchain.handle, vkc.alloc);
             slog.debug("created swapchain: {}X {}x{} {}", .{ swapchain.image_count, swapchain.extent.width, swapchain.extent.height, swapchain.image_format });
+            if (max_images < swapchain.image_count) unreachable;
 
             const images: []vk.Image = try gpa.alloc(vk.Image, swapchain.image_count);
             try swapchain.getImages(images);
@@ -209,6 +213,12 @@ pub const WindowContext = struct {
                     .desired_present_modes = try gpa.dupe(vk.PresentModeKHR, options.desired_present_modes),
                 },
             };
+        }
+
+        pub fn initForDynamicRendering(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
+            var s = try SwapchainState.init(ctx, options);
+            s.options.dynamic_rendering = true;
+            return s;
         }
 
         pub fn deinit(self: *@This(), ctx: *WindowContext) void {
@@ -254,7 +264,7 @@ pub const WindowContext = struct {
                 },
                 null,
             );
-            slog.debug("recreated swapchain: {}X {}x{} {}", .{ new_swapchain.image_count, new_swapchain.extent.width, new_swapchain.extent.height, new_swapchain.image_format });
+            // slog.debug("recreated swapchain: {}X {}x{} {}", .{ new_swapchain.image_count, new_swapchain.extent.width, new_swapchain.extent.height, new_swapchain.image_format });
             ctx.last_pixel_size.w = @floatFromInt(new_swapchain.extent.width);
             ctx.last_pixel_size.h = @floatFromInt(new_swapchain.extent.height);
 
@@ -267,9 +277,10 @@ pub const WindowContext = struct {
             try self.swapchain.getImages(self.images);
             self.image_views = try self.swapchain.getImageViewsAlloc(gpa, self.images, vkc.alloc);
             self.framebuffers = &.{};
+            self.current_layout = [_]vk.ImageLayout{.undefined} ** max_images;
         }
 
-        pub fn maybeResize(swapchain_state: *@This(), ctx: *WindowContext) !bool {
+        pub fn maybeRecreate(swapchain_state: *@This(), ctx: *WindowContext) !bool {
             if (ctx.recreate_swapchain_requested) {
                 try swapchain_state.recreate(ctx);
                 ctx.recreate_swapchain_requested = false;
@@ -285,6 +296,7 @@ pub const WindowContext = struct {
             shared_attachments: []const vk.ImageView,
             render_pass: vk.RenderPass,
         ) !bool {
+            if (swapchain_state.options.dynamic_rendering) unreachable;
             const vkc = ctx.backend.vkc;
             if (swapchain_state.framebuffers.len == 0) {
                 try swapchain_state.createFramebuffers(
@@ -309,8 +321,8 @@ pub const WindowContext = struct {
             const vkc = ctx.backend.vkc;
             const device = vkc.device;
             const image_index = blk: while (true) {
-                _ = try swapchain_state.maybeResize(ctx);
-                _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
+                _ = try swapchain_state.maybeRecreate(ctx);
+                if (!swapchain_state.options.dynamic_rendering) _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
 
                 const next_image_result = device.acquireNextImageKHR(
                     ctx.swapchain_state.?.swapchain.handle,
@@ -335,6 +347,7 @@ pub const WindowContext = struct {
                 }
                 break :blk next_image_result.image_index;
             };
+            // slog.debug("acq {}", .{image_index});
             return image_index; // autofix
         }
 
@@ -345,6 +358,7 @@ pub const WindowContext = struct {
             shared_attachments: []const vk.ImageView,
             render_pass: vk.RenderPass,
         ) !void {
+            if (swapchain_state.options.dynamic_rendering) unreachable;
             const device = vkc.device;
             const vk_alloc = vkc.alloc;
             for (swapchain_state.framebuffers) |fb| device.destroyFramebuffer(fb, vk_alloc);
@@ -378,6 +392,37 @@ pub const WindowContext = struct {
             }
 
             swapchain_state.framebuffers = framebuffers.items;
+        }
+
+        pub fn transitionLayout(self: *@This(), cmd: vk.CommandBufferProxy, image_index: usize, layout: vk.ImageLayout) void {
+            if (!self.options.dynamic_rendering) unreachable;
+            if (layout != .present_src_khr and layout != .color_attachment_optimal) unreachable;
+            const current_layout = self.current_layout[image_index];
+            if (current_layout != layout) {
+                var img_barrier = vk.ImageMemoryBarrier2{
+                    .old_layout = current_layout,
+                    .new_layout = layout,
+                    .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                    .image = self.images[image_index],
+                    .subresource_range = .{
+                        .aspect_mask = .{ .color_bit = true },
+                        .base_mip_level = 0,
+                        .level_count = 1,
+                        .base_array_layer = 0,
+                        .layer_count = 1,
+                    },
+                };
+                if (current_layout != .undefined) {
+                    if (layout == .color_attachment_optimal) {}
+                    if (layout == .present_src_khr) {
+                        img_barrier.src_access_mask.color_attachment_write_bit = true;
+                        img_barrier.src_stage_mask.color_attachment_output_bit = true;
+                    }
+                }
+                cmd.pipelineBarrier2(&.{ .p_image_memory_barriers = @ptrCast(&img_barrier), .image_memory_barrier_count = 1 });
+                self.current_layout[image_index] = layout;
+            }
         }
     };
 
@@ -598,6 +643,7 @@ pub fn present(
     swapchain: vk.SwapchainKHR,
     image_index: u32,
 ) !bool {
+    // slog.debug("present {}", .{image_index});
     const vkc = ctx.backend.vkc;
     const wait_semaphores = [_]vk.Semaphore{sync.image_available};
     const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};

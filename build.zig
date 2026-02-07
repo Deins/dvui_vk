@@ -58,7 +58,7 @@ pub fn build(b: *Build) !void {
     const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
     if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
 
-    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse false;
+    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse (target.result.os.tag != .windows);
     const glfw = if (glfw_on) b.lazyDependency("glfw", .{}) else null;
     const glfw_build = if (glfw_on) b.lazyDependency("glfw_build", .{}) else null;
 

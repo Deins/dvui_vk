@@ -24,11 +24,16 @@ const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
 const Mat4 = zm.Matrix(4, 4, f32, .{});
 
+/// enables vk 1.3 with dynamic rendering. Gets rid of render passes & framebuffers.
+/// https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html
+const dynamic_rendering = false;
+
 pub const DepthBuffer = struct {
     image: vk.Image,
     view: vk.ImageView,
     memory: vk.DeviceMemory,
     size: vk.Extent2D,
+    current_layout: vk.ImageLayout = .undefined,
     const format = vk.Format.d32_sfloat;
 
     pub fn init(vkc: VkContext, size: vk.Extent2D, device_local_mem_idx: u32) !DepthBuffer {
@@ -89,6 +94,26 @@ pub const DepthBuffer = struct {
         dev.destroyImage(self.image, vk_alloc);
         dev.freeMemory(self.memory, vk_alloc);
     }
+
+    pub fn transitionLayout(self: *@This(), cmd: vk.CommandBufferProxy, layout: vk.ImageLayout) void {
+        if (self.current_layout != layout) {
+            const img_barrier = vk.ImageMemoryBarrier2{
+                .old_layout = self.current_layout,
+                .new_layout = layout,
+                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+                .image = self.image,
+                .subresource_range = .{
+                    .aspect_mask = .{ .depth_bit = true },
+                    .base_mip_level = 0,
+                    .level_count = 1,
+                    .base_array_layer = 0,
+                    .layer_count = 1,
+                },
+            };
+            cmd.pipelineBarrier2(&.{ .p_image_memory_barriers = @ptrCast(&img_barrier), .image_memory_barrier_count = 1 });
+        }
+    }
 };
 
 pub const AppState = struct {
@@ -145,20 +170,28 @@ pub const AppState = struct {
             };
         } else @compileError("Platform not implemented!");
 
-        var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{
-            .extended_dynamic_state = .true,
-        };
+        var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{ .extended_dynamic_state = .true };
         b.vkc = try VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurface, .{
+            .instance_settings = .{
+                .required_api_version = if (dynamic_rendering) vk.API_VERSION_1_3 else vk.API_VERSION_1_2,
+                // .enable_validation = true,
+            },
             .device_select_settings = .{
+                .required_api_version = if (dynamic_rendering) vk.API_VERSION_1_3 else vk.API_VERSION_1_2,
                 .required_extensions = &.{
                     vk.extensions.khr_swapchain.name,
                     vk.extensions.ext_extended_dynamic_state.name, // for dynamic depth on/off
+                },
+                .required_features_13 = .{
+                    .synchronization_2 = .true,
+                    .dynamic_rendering = .true,
                 },
             },
             .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
         });
 
-        window_context.swapchain_state = try DvuiVkBackend.WindowContext.SwapchainState.init(window_context, .{
+        const swapchainInit = if (dynamic_rendering) DvuiVkBackend.WindowContext.SwapchainState.initForDynamicRendering else DvuiVkBackend.WindowContext.SwapchainState.init;
+        window_context.swapchain_state = try swapchainInit(window_context, .{
             .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
             .present_queue_index = b.vkc.physical_device.present_queue_index orelse b.vkc.physical_device.graphics_queue_index,
             .desired_min_image_count = max_frames_in_flight,
@@ -186,7 +219,15 @@ pub const AppState = struct {
             .queue = b.vkc.graphics_queue.handle,
             .pdev = b.vkc.physical_device.handle,
             .memory = DvuiVkBackend.VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-            .render_pass = render_pass,
+            .render_pass = if (dynamic_rendering) .{
+                .dynamic = vk.PipelineRenderingCreateInfo{
+                    .color_attachment_count = 1,
+                    .view_mask = 0,
+                    .p_color_attachment_formats = &[_]vk.Format{.a2b10g10r10_unorm_pack32}, // todo: get actual
+                    .depth_attachment_format = DepthBuffer.format,
+                    .stencil_attachment_format = .undefined,
+                },
+            } else .{ .static = render_pass },
             .max_frames_in_flight = max_frames_in_flight,
         });
 
@@ -394,6 +435,8 @@ pub const Scene = struct {
 
 // 3d renderpass
 pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.RenderPass {
+    if (dynamic_rendering) return .null_handle;
+
     const color_attachment = vk.AttachmentDescription{
         .format = image_format,
         .samples = .{ .@"1_bit" = true },
@@ -452,7 +495,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
     return device.createRenderPass(&renderpass_info, null);
 }
 
-pub const max_frames_in_flight = 2;
+pub const max_frames_in_flight = 3;
 pub var vsync = true;
 pub var sleep_when_no_events = false;
 
@@ -598,7 +641,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         b.renderer.?.device_local_mem_idx,
     );
 
-    const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
+    const framebuffer = if (dynamic_rendering) void else ctx.swapchain_state.?.framebuffers[image_index];
     const command_buffer = app_state.command_buffers[sync.current_frame];
     try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
     const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
@@ -608,18 +651,50 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
     };
     const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
-    const render_pass_begin_info = vk.RenderPassBeginInfo{
-        .render_pass = render_pass,
-        .framebuffer = framebuffer,
-        .render_area = .{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        },
-        .clear_value_count = clear_values.len,
-        .p_clear_values = &clear_values,
-    };
 
-    cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
+    if (dynamic_rendering) {
+        g_app_state.depth_buffer.transitionLayout(cmd, .depth_attachment_optimal);
+        ctx.swapchain_state.?.transitionLayout(cmd, image_index, .color_attachment_optimal);
+        const framebuffer_size = g_app_state.backend.contexts.items[0].last_pixel_size;
+        cmd.beginRendering(&.{
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = @intFromFloat(framebuffer_size.w), .height = @intFromFloat(framebuffer_size.h) } },
+            .view_mask = 0,
+            .layer_count = 1,
+            .color_attachment_count = 1,
+            .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
+                .image_view = ctx.swapchain_state.?.image_views[image_index],
+                .image_layout = .color_attachment_optimal,
+                .resolve_mode = .{},
+                .resolve_image_view = .null_handle,
+                .resolve_image_layout = .color_attachment_optimal,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+            }},
+            .p_depth_attachment = &.{
+                .image_view = g_app_state.depth_buffer.view,
+                .image_layout = .depth_attachment_optimal,
+                .resolve_mode = .{},
+                .resolve_image_view = .null_handle,
+                .resolve_image_layout = .depth_attachment_optimal,
+                .load_op = .clear,
+                .store_op = .store,
+                .clear_value = .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
+            },
+        });
+    } else {
+        const render_pass_begin_info = vk.RenderPassBeginInfo{
+            .render_pass = render_pass,
+            .framebuffer = framebuffer,
+            .render_area = .{
+                .offset = .{ .x = 0, .y = 0 },
+                .extent = extent,
+            },
+            .clear_value_count = clear_values.len,
+            .p_clear_values = &clear_values,
+        };
+        cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
+    }
 
     cmd.setDepthTestEnableEXT(.true);
     cmd.setDepthWriteEnableEXT(.true);
@@ -650,7 +725,10 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     }
 
-    cmd.endRenderPass();
+    if (dynamic_rendering) {
+        cmd.endRendering();
+        ctx.swapchain_state.?.transitionLayout(cmd, image_index, .present_src_khr);
+    } else cmd.endRenderPass();
     cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
 
     if (!try DvuiVkBackend.present(
@@ -823,6 +901,13 @@ fn createPipeline(
         .subpass = 0,
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
+        .p_next = if (dynamic_rendering) &vk.PipelineRenderingCreateInfo{
+            .color_attachment_count = 1,
+            .view_mask = 0,
+            .p_color_attachment_formats = &[_]vk.Format{.a2b10g10r10_unorm_pack32}, // todo: get actual
+            .depth_attachment_format = DepthBuffer.format,
+            .stencil_attachment_format = .undefined,
+        } else null,
     };
 
     var pipeline: vk.Pipeline = undefined;
@@ -848,7 +933,7 @@ pub fn acquireImageMaybeRecreate(
     const vkc = ctx.backend.vkc;
     const device = vkc.device;
     const image_index = blk: while (true) {
-        if (try swapchain_state.maybeResize(ctx)) {
+        if (try swapchain_state.maybeRecreate(ctx)) {
             // recreate depth
             g_app_state.depth_buffer.deinit(vkc);
             g_app_state.depth_buffer = try DepthBuffer.init(
@@ -858,7 +943,7 @@ pub fn acquireImageMaybeRecreate(
             );
         }
         const shared_attachments = &[1]vk.ImageView{g_app_state.depth_buffer.view};
-        _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
+        if (!dynamic_rendering) _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
 
         const next_image_result = device.acquireNextImageKHR(
             ctx.swapchain_state.?.swapchain.handle,
@@ -883,6 +968,7 @@ pub fn acquireImageMaybeRecreate(
         }
         break :blk next_image_result.image_index;
     };
+    // slog.debug("acq {}", .{image_index});
     return image_index; // autofix
 }
 
@@ -984,6 +1070,7 @@ pub const Model = struct {
         }, vk_alloc);
         errdefer dev.freeMemory(host_visible_mem, vk_alloc);
         const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..mem_size];
+        defer dev.unmapMemory(host_visible_mem);
         if (gltf.glb_binary) |bin| {
             @memcpy(host_vis_data, bin);
         } else return error.Invalid; // TODO: at the moment support only glb with builtin buffer

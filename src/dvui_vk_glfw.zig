@@ -347,7 +347,7 @@ pub fn main() !void {
         .queue = b.vkc.graphics_queue.handle,
         .pdev = b.vkc.physical_device.handle,
         .memory = VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-        .render_pass = render_pass,
+        .render_pass = .{ .static = render_pass },
         .max_frames_in_flight = max_frames_in_flight,
     });
 

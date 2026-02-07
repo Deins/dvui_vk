@@ -16,7 +16,7 @@ pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse false;
+    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse (target.result.os.tag != .windows);
     const dvui_vk_dep = b.dependency("dvui_vk", .{
         .target = target,
         .optimize = optimize,
