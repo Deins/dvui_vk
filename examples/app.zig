@@ -180,7 +180,7 @@ pub fn frame() !dvui.App.Result {
     }
 
     // look at demo() for examples of dvui widgets, shows in a floating window
-    dvui.Examples.demo();
+    dvui.Examples.demo(.full);
 
     dvui.currentWindow().backend.impl.get().drawStats();
 

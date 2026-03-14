@@ -129,7 +129,7 @@ pub fn drawClippedTriangles(ch: ContextHandle, texture: ?dvui.Texture, vtx: []co
 
 /// Create a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreate(ch: ContextHandle, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) TextureError!dvui.Texture {
+pub fn textureCreate(ch: ContextHandle, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) TextureError!dvui.Texture {
     return ch.renderer().textureCreate(pixels, width, height, interpolation);
 }
 
@@ -150,7 +150,7 @@ pub fn textureDestroy(ch: ContextHandle, texture: dvui.Texture) void {
 
 /// Create a `dvui.Texture` that can be rendered to with `renderTarget`.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreateTarget(ch: ContextHandle, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) TextureError!dvui.TextureTarget {
+pub fn textureCreateTarget(ch: ContextHandle, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) TextureError!dvui.TextureTarget {
     return ch.renderer().textureCreateTarget(width, height, interpolation);
 }
 
@@ -159,11 +159,28 @@ pub fn textureReadTarget(ch: ContextHandle, texture: dvui.TextureTarget, pixels_
     return ch.renderer().textureReadTarget(texture, pixels_out);
 }
 
+/// Clear a texture target without destroying it.
+pub fn textureClearTarget(ch: ContextHandle, texture: dvui.Texture.Target) void {
+    _ = ch;
+    _ = texture;
+}
+
+/// Destroy `texture` made with `textureCreateTarget`. After this call, this
+/// texture pointer will not be used by dvui.
+pub fn textureDestroyTarget(ch: ContextHandle, texture: dvui.Texture.Target) void {
+    ch.renderer().textureDestroy(.{ .ptr = texture.ptr, .width = texture.width, .height = texture.height, .format = texture.format });
+}
+
 /// Convert texture target made with `textureCreateTarget` into return texture
 /// as if made by `textureCreate`.  After this call, texture target will not be
 /// used by dvui.
 pub fn textureFromTarget(ch: ContextHandle, texture: dvui.TextureTarget) TextureError!dvui.Texture {
     return ch.renderer().textureFromTarget(texture);
+}
+
+/// Get a temporary drawable texture from this target.  target is not destroyed.
+pub fn textureFromTargetTemp(ch: ContextHandle, target: dvui.TextureTarget) TextureError!dvui.Texture {
+    return ch.renderer().textureFromTarget(target);
 }
 
 /// Render future `drawClippedTriangles` to the passed `texture` (or screen

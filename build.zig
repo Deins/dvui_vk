@@ -53,7 +53,7 @@ pub fn build(b: *Build) !void {
     // Add vk-kickstart
     const kickstart_dep = b.lazyDependency("vk_kickstart", .{
         .registry = vk_registry,
-        // .verbose = true,
+        .verbose = false,
     });
     const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
     if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
@@ -234,6 +234,8 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
                         } else {
                             const compile = b.addSystemCommand(&.{
                                 "slangc",
+                                "-matrix-layout-row-major",
+                                "-fvk-use-gl-layout",
                                 "-target",
                                 "spirv",
                                 "-entry",

@@ -117,7 +117,7 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
         stats_box.deinit();
     }
 
-    dvui.Examples.demo();
+    dvui.Examples.demo(.full);
 }
 
 pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {

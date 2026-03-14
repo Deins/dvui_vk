@@ -63,11 +63,15 @@ pub const VkContext = struct {
             );
         };
         errdefer instance.destroyInstance(null);
+        slog.info("vk instance ok", .{});
 
         // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
         // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
 
-        if (!createSurface(window_context, instance)) return error.FailedToCreateSurface;
+        if (!createSurface(window_context, instance)) {
+            slog.err("Failed to create surface!", .{});
+            return error.FailedToCreateSurface;
+        }
 
         var select_settings = opt.device_select_settings;
         if (select_settings.surface != .null_handle) unreachable;
