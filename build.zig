@@ -217,10 +217,17 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
                 const file_contents = dir.readFileAlloc(b.allocator, f.name, 10 * 1024 * 1024) catch unreachable;
                 defer b.allocator.free(file_contents);
                 const shader_types: []const []const u8 = &.{ "[shader(\"vertex\")]", "[shader(\"fragment\")]" };
+                const base_name = blk: {
+                    const main_suffix = ".main.slang";
+                    if (std.mem.endsWith(u8, f.name, main_suffix)) {
+                        break :blk f.name[0 .. f.name.len - main_suffix.len];
+                    }
+                    break :blk f.name[0 .. f.name.len - ".slang".len];
+                };
                 for (shader_types, 0..) |_, shader_type_idx| {
                     if (std.mem.indexOfAnyPos(u8, file_contents, 0, shader_types[shader_type_idx])) |_| {
                         const out_name = std.mem.join(b.allocator, "", &.{
-                            f.name[0 .. f.name.len - ".slang".len],
+                            base_name,
                             switch (shader_type_idx) {
                                 0 => ".vert",
                                 1 => ".frag",

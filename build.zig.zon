@@ -6,8 +6,8 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui.git#535ff1503b35d4107a3ea51bc41af26e858cb235",
-            .hash = "dvui-0.4.0-dev-AQFJmf-A3gCWYqYVQjenwJbQLtLAYAr2EnNWhbEdHI5O",
+            .url = "git+https://github.com/david-vanderson/dvui.git#c340b88053280e1cf19890e56c797664f9bf7ca2",
+            .hash = "dvui-0.4.0-dev-AQFJmTXU3wBJ2wCYyH4UeUWkMBSJbY7y6Ouc11_Gkls1",
         },
 
         .vulkan = .{
@@ -22,8 +22,8 @@
         },
         // required for windows
         .win32 = .{
-            .url = "git+https://github.com/marlersoft/zigwin32#5587b16fa040573846a6bf531301f6206d31a6bf",
-            .hash = "zigwin32-25.0.28-preview-AAAAAICM5AMResOGQnQ85mfe60TTOQeMtt7GRATUOKoP",
+            .url = "git+https://github.com/marlersoft/zigwin32#3cf488b9aabc770c88e50d392c4743635b2de18f",
+            .hash = "win32-25.0.28-preview-mX5pFbUs5QMPgpxcmfqg2Ly-zG_LDeUr9Bp5MDSTFfJQ",
             .lazy = true,
         },
 
