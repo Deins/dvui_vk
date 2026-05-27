@@ -110,7 +110,7 @@ pub const VkContext = struct {
 
 pub const VkBackend = struct {
     gpa: std.mem.Allocator,
-    contexts: std.ArrayListUnmanaged(*WindowContext) = .{},
+    contexts: std.ArrayListUnmanaged(*WindowContext) = .empty,
     contexts_pool: std.heap.MemoryPool(WindowContext),
 
     vkc: VkContext,
@@ -120,7 +120,7 @@ pub const VkBackend = struct {
     pub fn init(gpa: std.mem.Allocator, vkc: VkContext) VkBackend {
         return .{
             .gpa = gpa,
-            .contexts_pool = std.heap.MemoryPool(WindowContext).init(gpa),
+            .contexts_pool = .empty,
             .vkc = vkc,
         };
     }
@@ -129,13 +129,13 @@ pub const VkBackend = struct {
         for (self.contexts.items) |ctx| ctx.deinit();
         self.contexts.deinit(self.gpa);
         if (self.renderer) |*r| r.deinit(self.gpa);
-        self.contexts_pool.deinit();
+        self.contexts_pool.deinit(self.gpa);
         self.vkc.deinit(self.gpa);
     }
 
     /// alloc context without init
     pub fn allocContext(self: *@This()) !*WindowContext {
-        const v = try self.contexts_pool.create();
+        const v = try self.contexts_pool.create(self.gpa);
         errdefer self.contexts_pool.destroy(v);
         try self.contexts.append(self.gpa, v);
         return v;
@@ -170,7 +170,7 @@ pub const WindowContext = struct {
     arena: std.mem.Allocator = undefined,
 
     hwnd: if (builtin.os.tag != .windows) void else *anyopaque, // win32.HWND
-    glfw_win: ?*c_long = null,
+    glfw_win: ?*anyopaque = null,
 
     pub const SwapchainState = struct {
         pub const max_images = 4;
@@ -612,7 +612,7 @@ pub const FrameSync = struct {
     pub fn begin(sync: *@This(), device: vk.DeviceProxy) vk.DeviceProxy.WaitForFencesError!void {
         sync.current_frame = @intCast(sync.frames_done % sync.items.len);
         // check/wait for previous frame to finish
-        const result = try device.waitForFences(1, @ptrCast(&sync.items[sync.current_frame].in_flight_fence), .true, std.math.maxInt(u64));
+        const result = try device.waitForFences(&.{sync.items[sync.current_frame].in_flight_fence}, .true, std.math.maxInt(u64));
         std.debug.assert(result == .success); // no timeout is used, so if result is returned should be successes
     }
 
@@ -664,10 +664,10 @@ pub fn present(
     };
 
     const fences = [_]vk.Fence{sync.in_flight_fence};
-    try vkc.device.resetFences(fences.len, &fences);
+    try vkc.device.resetFences(&fences);
 
     const submits = [_]vk.SubmitInfo{submit_info};
-    try vkc.graphics_queue.submit(submits.len, &submits, sync.in_flight_fence);
+    try vkc.graphics_queue.submit(&submits, sync.in_flight_fence);
 
     const indices = [_]u32{image_index};
     const swapchains = [_]vk.SwapchainKHR{swapchain};
@@ -812,14 +812,19 @@ pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
         }
         return;
     } else if (builtin.os.tag == .linux) {
-        // TODO: review, this can block
         const open_cmd = "xdg-open";
-        var cmd = std.process.Child.init(&[_][]const u8{ open_cmd, url }, arena);
-        const term = cmd.spawnAndWait() catch |err| {
-            slog.warn("openURL: failed: {}", .{err});
-            return error.BackendError;
+        var child = std.process.spawn(std.Options.debug_io, .{
+            .argv = &.{ open_cmd, url },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return error.BackendError,
         };
-        if (term == .Exited and term.Exited == 0) return; // success
+        defer child.kill(std.Options.debug_io);
+        _ = child.wait(std.Options.debug_io) catch return error.BackendError;
+        return;
     }
     return error.BackendError;
 }

@@ -1,7 +1,7 @@
 .{
     .name = .dvui_vk_examples,
     .version = "0.0.0",
-    .minimum_zig_version = "0.15.1", // tested on 0.15.2
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0xa1d7543a1ebfc8,
     .dependencies = .{
         .dvui_vk = .{

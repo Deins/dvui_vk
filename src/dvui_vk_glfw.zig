@@ -1,7 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 pub const dvui = @import("dvui");
-pub const glfw = @import("glfw");
+pub const glfw = @import("zglfw");
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_glfw);
 comptime {
@@ -63,10 +63,14 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
     return &ch.backend().renderer.?;
 }
 
+fn glfwWin(context: *WindowContext) *glfw.Window {
+    return @ptrCast(@alignCast(context.glfw_win.?));
+}
+
 pub fn createVkSurfaceGLFW(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
     const vk_alloc = null; //  @ptrCast(self.backend.vkc.alloc)
-    const res = glfw.createWindowSurface(@intFromEnum(vk_instance.handle), self.glfw_win.?, vk_alloc, @ptrCast(&self.surface));
-    return res == .success;
+    glfw.createWindowSurface(@ptrFromInt(@intFromEnum(vk_instance.handle)), glfwWin(self), vk_alloc, @ptrCast(&self.surface)) catch return false;
+    return true;
 }
 pub const createVkSurface = createVkSurfaceGLFW;
 
@@ -76,11 +80,11 @@ pub const createVkSurface = createVkSurfaceGLFW;
 
 /// Get monotonic nanosecond timestamp. Doesn't have to be system time.
 pub fn nanoTime(_: ContextHandle) i128 {
-    return std.time.nanoTimestamp();
+    return @intFromFloat(glfw.getTime() * std.time.ns_per_s);
 }
 
 pub fn sleep(_: ContextHandle, ns: u64) void {
-    std.Thread.sleep(ns);
+    glfw.waitEventsTimeout(@as(f64, @floatFromInt(ns)) / std.time.ns_per_s);
 }
 
 /// Called by dvui during `dvui.Window.begin`, so prior to any dvui
@@ -191,16 +195,16 @@ pub fn renderTarget(ch: ContextHandle, texture: ?dvui.TextureTarget) GenericErro
 
 /// Get clipboard content (text only)
 pub fn clipboardText(self: ContextHandle) GenericError![]const u8 {
-    return glfw.getClipboardString(get(self).glfw_win) orelse return error.BackendError;
+    return glfwWin(get(self)).getClipboardString() orelse return error.BackendError;
 }
 
 /// Set clipboard content (text only)
 pub fn clipboardTextSet(self: ContextHandle, text: []const u8) GenericError!void {
     const ctx = get(self);
     if (text.len == 0) return;
-    const c_text = try ctx.arena.dupeZ(u8, text);
+    const c_text = try ctx.arena.dupeSentinel(u8, text, 0);
     defer ctx.arena.free(c_text);
-    glfw.setClipboardString(ctx.glfw_win, c_text.ptr);
+    glfwWin(ctx).setClipboardString(c_text);
 }
 
 /// Open URL in system browser
@@ -242,10 +246,10 @@ pub fn initWindow(context: *WindowContext, options: InitOptions) !void {
     const size = if (options.size) |s| s else dvui.Size{ .w = context.last_pixel_size.w, .h = context.last_pixel_size.h };
     context.last_pixel_size = .{ .w = size.w, .h = size.h };
     context.last_window_size = .{ .w = size.w, .h = size.h };
-    glfw.windowHint(glfw.ClientAPI, glfw.NoAPI);
-    context.glfw_win = try glfw.createWindow(@intFromFloat(size.w), @intFromFloat(size.h), options.title, null, null);
-    glfw.setWindowUserPointer(context.glfw_win.?, context);
-    _ = glfw.setWindowSizeCallback(context.glfw_win.?, &resizeCB);
+    glfw.windowHint(.client_api, .no_api);
+    context.glfw_win = try glfw.Window.create(@intFromFloat(size.w), @intFromFloat(size.h), options.title, null);
+    glfwWin(context).setUserPointer(context);
+    _ = glfwWin(context).setSizeCallback(&resizeCB);
 }
 
 //
@@ -258,7 +262,7 @@ pub var g_app_state: AppState = undefined;
 pub const paint = dvui_vk_common.paint;
 
 pub fn getInstanceProcAddress(instance: vk.Instance, procname: [*:0]const u8) vk.PfnVoidFunction {
-    return glfw.getInstanceProcAddress(@intFromEnum(instance), procname);
+    return @ptrCast(glfw.getInstanceProcAddress(@ptrFromInt(@intFromEnum(instance)), procname));
 }
 
 pub fn main() !void {
@@ -266,17 +270,13 @@ pub fn main() !void {
 
     const app = dvui.App.get() orelse return error.DvuiAppNotDefined;
 
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_instance = std.heap.DebugAllocator(.{}){};
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
     {
         try glfw.init();
-        var major: i32 = 0;
-        var minor: i32 = 0;
-        var rev: i32 = 0;
-        glfw.getVersion(&major, &minor, &rev);
-        slog.info("GLFW {}.{}.{} vk_support: {}", .{ major, minor, rev, glfw.vulkanSupported() });
+        slog.info("GLFW vk_support: {}", .{glfw.isVulkanSupported()});
     }
     defer glfw.terminate();
 
@@ -303,8 +303,8 @@ pub fn main() !void {
         slog.err("initWindow failed: {}", .{err});
         return err;
     };
-    const window = window_context.glfw_win;
-    defer glfw.destroyWindow(window);
+    const window = glfwWin(window_context);
+    defer window.destroy();
     // TODO: this sucks, because to select vk.device we need window, it creates this nasty circular partial initialization nastiness.
 
     b.vkc = VkContext.init(gpa, loader, window_context, &createVkSurfaceGLFW, .{
@@ -368,17 +368,17 @@ pub fn main() !void {
         .max_frames_in_flight = max_frames_in_flight,
     });
 
-    registerDvuiIO(window_context.glfw_win.?);
+    registerDvuiIO(glfwWin(window_context));
 
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
     //extern fn glfwSetWindowRefreshCallback(window: ?*Window, callback: WindowRefreshFun) WindowRefreshFun;
     if (builtin.os.tag == .windows) { // windows blocks event loop while resizing, use separate callback to keep rendering
-        _ = glfw.setWindowRefreshCallback(window, &refreshCB);
+        _ = setWindowRefreshCallback(window, &refreshCB);
     }
 
-    while (!glfw.windowShouldClose(window)) {
-        if (glfw.getKey(window, glfw.KeyEscape) == glfw.Press) {
-            glfw.setWindowShouldClose(window, true);
+    while (!window.shouldClose()) {
+        if (window.getKey(.escape) == .press) {
+            window.setShouldClose(true);
         }
 
         // TODO: fixme: implement actual multi-window implementation, this won't work right
@@ -415,7 +415,7 @@ pub fn resizeCB(window: *glfw.Window, w: c_int, h: c_int) callconv(.c) void {
 //      INPUT
 //
 pub fn glfwWindowContext(win: *glfw.Window) *WindowContext {
-    return @ptrCast(@alignCast(glfw.getWindowUserPointer(win)));
+    return win.getUserPointer(WindowContext).?;
 }
 
 pub var disable_wait_event: bool = false;
@@ -442,20 +442,19 @@ pub fn waitEventTimeout(self: *@This(), timeout_micros: u32) !bool {
 }
 
 pub fn registerDvuiIO(win: *glfw.Window) void {
-    _ = glfw.setCursorPosCallback(win, &CursorPosCB);
-    _ = glfw.setCursorEnterCallback(win, &CursorEnterCB);
-    _ = glfw.setScrollCallback(win, &ScrollCB);
-    _ = glfw.setKeyCallback(win, &KeyCB);
-    _ = glfw.setCharCallback(win, &CharCB);
-    _ = glfw.setCharModsCallback(win, &CharmodsCB);
-    _ = glfw.setDropCallback(win, &DropCB);
-    _ = glfw.setMouseButtonCallback(win, &MouseButtonCB);
+    _ = win.setCursorPosCallback(&CursorPosCB);
+    _ = win.setCursorEnterCallback(&CursorEnterCB);
+    _ = win.setScrollCallback(&ScrollCB);
+    _ = win.setKeyCallback(&KeyCB);
+    _ = win.setCharCallback(&CharCB);
+    _ = win.setDropCallback(&DropCB);
+    _ = win.setMouseButtonCallback(&MouseButtonCB);
 }
 
 //Mods is bitfield of modifiers, button is enum of mouse buttons, and action is enum of keystates.
-pub fn MouseButtonCB(window: *glfw.Window, button: c_int, action: c_int, mods: c_int) callconv(.c) void {
+pub fn MouseButtonCB(window: *glfw.Window, button: glfw.MouseButton, action: glfw.Action, mods: glfw.Mods) callconv(.c) void {
     _ = mods; // autofix
-    _ = glfwWindowContext(window).dvui_window.addEventMouseButton(glfwMouseButtonToDvui(button), if (action == glfw.Press) .press else .release) catch unreachable;
+    _ = glfwWindowContext(window).dvui_window.addEventMouseButton(glfwMouseButtonToDvui(button), if (action == .press) .press else .release) catch unreachable;
 }
 
 pub fn CursorPosCB(window: *glfw.Window, xpos: f64, ypos: f64) callconv(.c) void {
@@ -472,17 +471,17 @@ pub fn CursorEnterCB(window: *glfw.Window, entered: c_int) callconv(.c) void {
     _ = entered; // autofix
 }
 pub fn ScrollCB(window: *glfw.Window, xoffset: f64, yoffset: f64) callconv(.c) void {
-    if (xoffset != 0) _ = glfwWindowContext(window).dvui_window.addEventMouseWheel(@as(f32, @floatCast(xoffset)) * dvui.scroll_speed, .horizontal) catch unreachable;
-    if (yoffset != 0) _ = glfwWindowContext(window).dvui_window.addEventMouseWheel(@as(f32, @floatCast(yoffset)) * dvui.scroll_speed, .vertical) catch unreachable;
+    if (xoffset != 0) _ = glfwWindowContext(window).dvui_window.addEventMouseWheel(@as(f32, @floatCast(xoffset)) * dvui.scroll_speed, .horizontal, null) catch unreachable;
+    if (yoffset != 0) _ = glfwWindowContext(window).dvui_window.addEventMouseWheel(@as(f32, @floatCast(yoffset)) * dvui.scroll_speed, .vertical, null) catch unreachable;
 }
 //Mods refers to the bitfield of Modifiers
-pub fn KeyCB(window: *glfw.Window, key: c_int, scancode: c_int, action: c_int, mods: c_int) callconv(.c) void {
+pub fn KeyCB(window: *glfw.Window, key: glfw.Key, scancode: c_int, action: glfw.Action, mods: glfw.Mods) callconv(.c) void {
     _ = scancode; // autofix
     _ = glfwWindowContext(window).dvui_window.addEventKey(.{
         .code = glfwKeyCodeToDvui(key),
         .action = switch (action) {
-            glfw.Press => .down,
-            glfw.Repeat => .repeat,
+            .press => .down,
+            .repeat => .repeat,
             else => .up,
         },
         .mod = glfwModDvui(mods),
@@ -493,12 +492,7 @@ pub fn CharCB(window: *glfw.Window, codepoint: c_uint) callconv(.c) void {
     const len = std.unicode.utf8Encode(@intCast(codepoint), &buf) catch unreachable;
     _ = glfwWindowContext(window).dvui_window.addEventText(.{ .text = buf[0..len] }) catch {};
 }
-pub fn CharmodsCB(window: *glfw.Window, codepoint: c_uint, mods: c_int) callconv(.c) void {
-    _ = window; // autofix
-    _ = codepoint; // autofix
-    _ = mods; // autofix
-}
-pub fn DropCB(window: *glfw.Window, path_count: c_int, paths: [*:0]const u8) callconv(.c) void {
+pub fn DropCB(window: *glfw.Window, path_count: i32, paths: [*][*:0]const u8) callconv(.c) void {
     _ = window; // autofix
     _ = path_count; // autofix
     _ = paths; // autofix
@@ -514,161 +508,159 @@ pub fn JoystickCB(id: c_int, event: c_int) callconv(.c) void {
     _ = event; // autofix
 }
 
-pub fn glfwModDvui(mod: c_int) dvui.enums.Mod {
-    if (0 != mod & glfw.ModifierShift) return .lshift;
-    if (0 != mod & glfw.ModifierControl) return .lcontrol;
-    if (0 != mod & glfw.ModifierAlt) return .lalt;
-    if (0 != mod & glfw.ModifierSuper) return .lcommand;
+pub fn glfwModDvui(mod: glfw.Mods) dvui.enums.Mod {
+    if (mod.shift) return .lshift;
+    if (mod.control) return .lcontrol;
+    if (mod.alt) return .lalt;
+    if (mod.super) return .lcommand;
     // glfw.ModifierCapsLock => ,
     // glfw.ModifierNumLock => ,
     return .none;
 }
 
-pub fn glfwMouseButtonToDvui(button: c_int) dvui.enums.Button {
+pub fn glfwMouseButtonToDvui(button: glfw.MouseButton) dvui.enums.Button {
     return switch (button) {
-        glfw.MouseButtonLeft => .left,
-        glfw.MouseButtonRight => .right,
-        glfw.MouseButtonMiddle => .middle,
-        glfw.MouseButton4 => .four,
-        glfw.MouseButton5 => .five,
-        glfw.MouseButton6 => .six,
-        glfw.MouseButton7 => .seven,
-        glfw.MouseButton8 => .eight,
-        else => {
-            slog.warn("Unknown mouse button {}", .{button});
-            return .none;
-        },
+        .left => .left,
+        .right => .right,
+        .middle => .middle,
+        .four => .four,
+        .five => .five,
+        .six => .six,
+        .seven => .seven,
+        .eight => .eight,
     };
 }
 
-pub fn glfwKeyCodeToDvui(keycode: c_int) dvui.enums.Key {
+pub fn glfwKeyCodeToDvui(keycode: glfw.Key) dvui.enums.Key {
     return switch (keycode) {
-        glfw.KeyA => .a,
-        glfw.KeyB => .b,
-        glfw.KeyC => .c,
-        glfw.KeyD => .d,
-        glfw.KeyE => .e,
-        glfw.KeyF => .f,
-        glfw.KeyG => .g,
-        glfw.KeyH => .h,
-        glfw.KeyI => .i,
-        glfw.KeyJ => .j,
-        glfw.KeyK => .k,
-        glfw.KeyL => .l,
-        glfw.KeyM => .m,
-        glfw.KeyN => .n,
-        glfw.KeyO => .o,
-        glfw.KeyP => .p,
-        glfw.KeyQ => .q,
-        glfw.KeyR => .r,
-        glfw.KeyS => .s,
-        glfw.KeyT => .t,
-        glfw.KeyU => .u,
-        glfw.KeyV => .v,
-        glfw.KeyW => .w,
-        glfw.KeyX => .x,
-        glfw.KeyY => .y,
-        glfw.KeyZ => .z,
-
-        glfw.KeyNum0 => .zero,
-        glfw.KeyNum1 => .one,
-        glfw.KeyNum2 => .two,
-        glfw.KeyNum3 => .three,
-        glfw.KeyNum4 => .four,
-        glfw.KeyNum5 => .five,
-        glfw.KeyNum6 => .six,
-        glfw.KeyNum7 => .seven,
-        glfw.KeyNum8 => .eight,
-        glfw.KeyNum9 => .nine,
-
-        glfw.KeyF1 => .f1,
-        glfw.KeyF2 => .f2,
-        glfw.KeyF3 => .f3,
-        glfw.KeyF4 => .f4,
-        glfw.KeyF5 => .f5,
-        glfw.KeyF6 => .f6,
-        glfw.KeyF7 => .f7,
-        glfw.KeyF8 => .f8,
-        glfw.KeyF9 => .f9,
-        glfw.KeyF10 => .f10,
-        glfw.KeyF11 => .f11,
-        glfw.KeyF12 => .f12,
-        glfw.KeyF13 => .f13,
-        glfw.KeyF14 => .f14,
-        glfw.KeyF15 => .f15,
-        glfw.KeyF16 => .f16,
-        glfw.KeyF17 => .f17,
-        glfw.KeyF18 => .f18,
-        glfw.KeyF19 => .f19,
-        glfw.KeyF20 => .f20,
-        glfw.KeyF21 => .f21,
-        glfw.KeyF22 => .f22,
-        glfw.KeyF23 => .f23,
-        glfw.KeyF24 => .f24,
-        glfw.KeyF25 => .f25,
-
-        glfw.KeyKpDivide => .kp_divide,
-        glfw.KeyKpMultiply => .kp_multiply,
-        glfw.KeyKpSubtract => .kp_subtract,
-        glfw.KeyKpAdd => .kp_add,
-        glfw.KeyKp0 => .kp_0,
-        glfw.KeyKp1 => .kp_1,
-        glfw.KeyKp2 => .kp_2,
-        glfw.KeyKp3 => .kp_3,
-        glfw.KeyKp4 => .kp_4,
-        glfw.KeyKp5 => .kp_5,
-        glfw.KeyKp6 => .kp_6,
-        glfw.KeyKp7 => .kp_7,
-        glfw.KeyKp8 => .kp_8,
-        glfw.KeyKp9 => .kp_9,
-        glfw.KeyKpDecimal => .kp_decimal,
-        glfw.KeyKpEqual => .kp_equal,
-        glfw.KeyKpEnter => .kp_enter,
-
-        glfw.KeyEnter => .enter,
-        glfw.KeyEscape => .escape,
-        glfw.KeyTab => .tab,
-        glfw.KeyLeftShift => .left_shift,
-        glfw.KeyRightShift => .right_shift,
-        glfw.KeyLeftControl => .left_control,
-        glfw.KeyRightControl => .right_control,
-        glfw.KeyLeftAlt => .left_alt,
-        glfw.KeyRightAlt => .right_alt,
-        glfw.KeyLeftSuper => .left_command,
-        glfw.KeyRightSuper => .right_command,
-        glfw.KeyMenu => .menu,
-        glfw.KeyNumLock => .num_lock,
-        glfw.KeyCapsLock => .caps_lock,
-        glfw.KeyPrintScreen => .print,
-        glfw.KeyScrollLock => .scroll_lock,
-        glfw.KeyPause => .pause,
-        glfw.KeyDelete => .delete,
-        glfw.KeyHome => .home,
-        glfw.KeyEnd => .end,
-        glfw.KeyPageUp => .page_up,
-        glfw.KeyPageDown => .page_down,
-        glfw.KeyInsert => .insert,
-        glfw.KeyLeft => .left,
-        glfw.KeyRight => .right,
-        glfw.KeyUp => .up,
-        glfw.KeyDown => .down,
-        glfw.KeyBackspace => .backspace,
-        glfw.KeySpace => .space,
-        glfw.KeyMinus => .minus,
-        glfw.KeyEqual => .equal,
-        glfw.KeyLeftBracket => .left_bracket,
-        glfw.KeyRightBracket => .right_bracket,
-        glfw.KeyBackslash => .backslash,
-        glfw.KeySemicolon => .semicolon,
-        glfw.KeyApostrophe => .apostrophe,
-        glfw.KeyComma => .comma,
-        glfw.KeyPeriod => .period,
-        glfw.KeySlash => .slash,
-        glfw.KeyGraveAccent => .grave,
+        .a => .a,
+        .b => .b,
+        .c => .c,
+        .d => .d,
+        .e => .e,
+        .f => .f,
+        .g => .g,
+        .h => .h,
+        .i => .i,
+        .j => .j,
+        .k => .k,
+        .l => .l,
+        .m => .m,
+        .n => .n,
+        .o => .o,
+        .p => .p,
+        .q => .q,
+        .r => .r,
+        .s => .s,
+        .t => .t,
+        .u => .u,
+        .v => .v,
+        .w => .w,
+        .x => .x,
+        .y => .y,
+        .z => .z,
+        .zero => .zero,
+        .one => .one,
+        .two => .two,
+        .three => .three,
+        .four => .four,
+        .five => .five,
+        .six => .six,
+        .seven => .seven,
+        .eight => .eight,
+        .nine => .nine,
+        .F1 => .f1,
+        .F2 => .f2,
+        .F3 => .f3,
+        .F4 => .f4,
+        .F5 => .f5,
+        .F6 => .f6,
+        .F7 => .f7,
+        .F8 => .f8,
+        .F9 => .f9,
+        .F10 => .f10,
+        .F11 => .f11,
+        .F12 => .f12,
+        .F13 => .f13,
+        .F14 => .f14,
+        .F15 => .f15,
+        .F16 => .f16,
+        .F17 => .f17,
+        .F18 => .f18,
+        .F19 => .f19,
+        .F20 => .f20,
+        .F21 => .f21,
+        .F22 => .f22,
+        .F23 => .f23,
+        .F24 => .f24,
+        .F25 => .f25,
+        .kp_divide => .kp_divide,
+        .kp_multiply => .kp_multiply,
+        .kp_subtract => .kp_subtract,
+        .kp_add => .kp_add,
+        .kp_0 => .kp_0,
+        .kp_1 => .kp_1,
+        .kp_2 => .kp_2,
+        .kp_3 => .kp_3,
+        .kp_4 => .kp_4,
+        .kp_5 => .kp_5,
+        .kp_6 => .kp_6,
+        .kp_7 => .kp_7,
+        .kp_8 => .kp_8,
+        .kp_9 => .kp_9,
+        .kp_decimal => .kp_decimal,
+        .kp_equal => .kp_equal,
+        .kp_enter => .kp_enter,
+        .enter => .enter,
+        .escape => .escape,
+        .tab => .tab,
+        .left_shift => .left_shift,
+        .right_shift => .right_shift,
+        .left_control => .left_control,
+        .right_control => .right_control,
+        .left_alt => .left_alt,
+        .right_alt => .right_alt,
+        .left_super => .left_command,
+        .right_super => .right_command,
+        .menu => .menu,
+        .num_lock => .num_lock,
+        .caps_lock => .caps_lock,
+        .print_screen => .print,
+        .scroll_lock => .scroll_lock,
+        .pause => .pause,
+        .delete => .delete,
+        .home => .home,
+        .end => .end,
+        .page_up => .page_up,
+        .page_down => .page_down,
+        .insert => .insert,
+        .left => .left,
+        .right => .right,
+        .up => .up,
+        .down => .down,
+        .backspace => .backspace,
+        .space => .space,
+        .minus => .minus,
+        .equal => .equal,
+        .left_bracket => .left_bracket,
+        .right_bracket => .right_bracket,
+        .backslash => .backslash,
+        .semicolon => .semicolon,
+        .apostrophe => .apostrophe,
+        .comma => .comma,
+        .period => .period,
+        .slash => .slash,
+        .grave_accent => .grave,
 
         else => {
             slog.warn("Unknown key code {}", .{keycode});
             return .unknown;
         },
     };
+}
+
+const WindowRefreshFn = *const fn (*glfw.Window) callconv(.c) void;
+extern fn glfwSetWindowRefreshCallback(*glfw.Window, ?WindowRefreshFn) ?WindowRefreshFn;
+fn setWindowRefreshCallback(window: *glfw.Window, callback: ?WindowRefreshFn) ?WindowRefreshFn {
+    return glfwSetWindowRefreshCallback(window, callback);
 }

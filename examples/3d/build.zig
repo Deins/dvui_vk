@@ -1,16 +1,6 @@
 const std = @import("std");
 const Build = std.Build;
-const OptimizeMode = std.builtin.OptimizeMode;
-const ResolvedTarget = Build.ResolvedTarget;
-const Dependency = Build.Dependency;
-const sokol = @import("sokol");
 const dvui_vk = @import("dvui_vk");
-
-const TracyMode = enum {
-    off,
-    on,
-    on_demand, // starts profiling only once tracy connects
-};
 
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
@@ -26,8 +16,7 @@ pub fn build(b: *Build) !void {
     // Vulkan
     const vk_registry_opt = b.option([]const u8, "vk_registry", "Path to vulkan registry vk.xml");
     const vk_registry: Build.LazyPath = if (vk_registry_opt) |ps| Build.LazyPath{ .cwd_relative = ps } else blk: {
-        const env = std.process.getEnvMap(b.allocator) catch unreachable;
-        if (env.get("VULKAN_SDK")) |vk_path| {
+        if (b.graph.environ_map.get("VULKAN_SDK")) |vk_path| {
             break :blk Build.LazyPath{ .cwd_relative = b.pathJoin(&.{ vk_path, "share", "vulkan", "registry", "vk.xml" }) };
         }
 
@@ -45,7 +34,7 @@ pub fn build(b: *Build) !void {
         .registry = vk_registry,
     });
 
-    const dvui_dep = dvui_vk_dep.builder.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom });
+    const dvui_dep = dvui_vk_dep.builder.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom, .@"tree-sitter" = false });
     const dvui_module = dvui_dep.module("dvui");
 
     //
@@ -59,6 +48,7 @@ pub fn build(b: *Build) !void {
         .name = "3d",
         .root_module = exe_standalone_mod,
     });
+    if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
     exe_standalone.root_module.addImport("dvui", dvui_module);
     exe_standalone.root_module.addImport("vulkan", vkzig_dep.module("vulkan-zig"));
     // exe_standalone.root_module.addImport("zig_math", b.dependency("zig_math", .{ .target = target }).module("zig_math"));
@@ -84,4 +74,25 @@ pub fn build(b: *Build) !void {
             if (shader.step) |step| exe_standalone.step.dependOn(step);
         }
     }
+}
+
+fn patchedGlibcLibcFile(b: *Build) ?Build.LazyPath {
+    if (b.graph.host.result.os.tag != .linux) return null;
+
+    const patch_dir = b.cache_root.join(b.allocator, &.{"crt-patched"}) catch return null;
+
+    const patch = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt(
+        "CRT1=$(cc -print-file-name=crt1.o 2>/dev/null || echo /usr/lib/crt1.o) && " ++
+        "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
+        "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
+        "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
+        .{patch_dir},
+    ) });
+
+    const wf = b.addWriteFiles();
+    wf.step.dependOn(&patch.step);
+    return wf.add("patched-libc.txt", b.fmt(
+        "include_dir=/usr/include\nsys_include_dir=/usr/include\ncrt_dir={s}\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n",
+        .{patch_dir},
+    ));
 }

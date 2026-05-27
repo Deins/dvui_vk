@@ -536,7 +536,7 @@ pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.
         .min_depth = 0,
         .max_depth = 1,
     };
-    dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
+    dev.cmdSetViewport(cmdbuf, 0, &.{viewport});
 
     const push_constants = PushConstants{
         .view_scale = .{ 2.0 / framebuffer_size.w, 2.0 / framebuffer_size.h },
@@ -589,7 +589,7 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
             .offset = .{ .x = 0, .y = 0 },
             .extent = self.framebuffer_size,
         };
-        dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
+        dev.cmdSetScissor(cmdbuf, 0, &.{scissor});
     }
 
     const idx_offset: u32 = cf.idx_offset;
@@ -609,14 +609,14 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
             @memcpy(dst, std.mem.sliceAsBytes(vtx));
         }
         if (!self.host_vis_coherent)
-            dev.flushMappedMemoryRanges(modified_ranges.len, &modified_ranges) catch |err|
+            dev.flushMappedMemoryRanges(&modified_ranges) catch |err|
                 slog.err("flushMappedMemoryRanges: {}", .{err});
     }
 
     if (@sizeOf(Indice) != 2) unreachable;
     dev.cmdBindIndexBuffer(cmdbuf, cf.idx_buff, idx_offset, .uint16);
-    dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&cf.vtx_buff), &[_]vk.DeviceSize{vtx_offset});
-    var dset: vk.DescriptorSet = if (texture == null) self.dummy_texture.dset else blk: {
+    dev.cmdBindVertexBuffers(cmdbuf, 0, &.{cf.vtx_buff}, &.{vtx_offset});
+    const dset: vk.DescriptorSet = if (texture == null) self.dummy_texture.dset else blk: {
         if (texture.? == invalid_texture) break :blk self.error_texture.dset;
         const tex = @as(*Texture, @ptrCast(@alignCast(texture)));
         if (tex.trace.index < tex.trace.addrs.len / 2 + 1) tex.trace.addAddr(@returnAddress(), "render"); // if trace has some free room, trace this
@@ -627,9 +627,7 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
         .graphics,
         self.pipeline_layout,
         0,
-        1,
-        @ptrCast(&dset),
-        0,
+        &.{dset},
         null,
     );
     dev.cmdDrawIndexed(cmdbuf, @intCast(idx.len), 1, 0, 0, 0);
@@ -764,7 +762,7 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
                 .image = self.render_target_tex,
                 .subresource_range = srr,
             };
-            dev.cmdPipelineBarrier(cmdbuf, .{ .color_attachment_output_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+            dev.cmdPipelineBarrier(cmdbuf, .{ .color_attachment_output_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{img_barrier});
         }
         // TODO: transition to shader_src_optimal
         self.endSingleTimeCommands(cmdbuf) catch unreachable;
@@ -792,7 +790,7 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
                 .layer_count = 1,
             },
         };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+        dev.cmdPipelineBarrier(cmdbuf, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &.{img_barrier});
     }
 
     const w: f32 = @floatFromInt(self.framebuffer_size.width); // @floatFromInt(tt.fb_size.width)
@@ -838,7 +836,7 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
             .clear_value_count = 1,
             .p_clear_values = @ptrCast(&clear),
         }, .@"inline");
-        dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
+        dev.cmdSetViewport(cmdbuf, 0, &.{viewport});
     }
 
     const push_constants = PushConstants{
@@ -872,7 +870,7 @@ const Texture = struct {
     pub fn deinit(tex: Texture, b: *Backend) void {
         const dev = b.dev;
         const vk_alloc = b.vk_alloc;
-        dev.freeDescriptorSets(b.dpool, 1, &[_]vk.DescriptorSet{tex.dset}) catch |err| slog.err("Failed to free descriptor set: {}", .{err});
+        dev.freeDescriptorSets(b.dpool, &.{tex.dset}) catch |err| slog.err("Failed to free descriptor set: {}", .{err});
         dev.destroyImageView(tex.img_view, vk_alloc);
         dev.destroyImage(tex.img, vk_alloc);
         dev.freeMemory(tex.mem, vk_alloc);
@@ -1018,15 +1016,15 @@ fn createPipeline(
         .p_next = if (dynamic_render_pass) |s| &s else null,
     };
 
-    var pipeline: vk.Pipeline = undefined;
+    const gpci_one = [_]vk.GraphicsPipelineCreateInfo{gpci};
+    var pipeline_one: [1]vk.Pipeline = undefined;
     _ = try dev.createGraphicsPipelines(
         .null_handle,
-        1,
-        @ptrCast(&gpci),
+        &gpci_one,
         vk_alloc,
-        @ptrCast(&pipeline),
+        &pipeline_one,
     );
-    return pipeline;
+    return pipeline_one[0];
 }
 
 const AllocatedBuffer = struct {
@@ -1054,7 +1052,7 @@ fn stageToBuffer(
     @memcpy(data[0..contents.len], contents);
     defer self.dev.unmapMemory(mem);
     if (!self.host_vis_coherent)
-        try self.dev.flushMappedMemoryRanges(1, &.{.{ .memory = mem, .offset = mem_offset, .size = mreq.size }});
+        try self.dev.flushMappedMemoryRanges(&.{.{ .memory = mem, .offset = mem_offset, .size = mreq.size }});
     return .{ .buf = buf, .mem = mem };
 }
 
@@ -1079,7 +1077,7 @@ pub fn beginSingleTimeCommands(self: *Self) !vk.CommandBuffer {
 
 pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
     try self.dev.endCommandBuffer(cmdbuf);
-    defer self.dev.freeCommandBuffers(self.cpool, 1, @ptrCast(&cmdbuf));
+    defer self.dev.freeCommandBuffers(self.cpool, &.{cmdbuf});
 
     if (self.queue_lock) |l| l.lockCB(l.lock_userdata);
     defer if (self.queue_lock) |l| l.unlockCB(l.lock_userdata);
@@ -1095,8 +1093,8 @@ pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
 
     const fence = try self.dev.createFence(&.{}, self.vk_alloc);
     defer self.dev.destroyFence(fence, self.vk_alloc);
-    try self.dev.queueSubmit(self.queue, 1, &qs, fence);
-    if (try self.dev.waitForFences(1, &.{fence}, .true, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
+    try self.dev.queueSubmit(self.queue, &qs, fence);
+    if (try self.dev.waitForFences(&.{fence}, .true, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
 }
 
 pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpolation: dvui.enums.TextureInterpolation) !Texture {
@@ -1163,7 +1161,7 @@ pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpo
         .p_buffer_info = undefined,
         .p_texel_buffer_view = undefined,
     }};
-    dev.updateDescriptorSets(write_dss.len, &write_dss, 0, null);
+    dev.updateDescriptorSets(&write_dss, null);
 
     return Texture{ .img = img, .img_view = img_view, .mem = mem, .dset = dset[0] };
 }
@@ -1220,7 +1218,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .image = tex.img,
             .subresource_range = srr,
         };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .host_bit = true, .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+        dev.cmdPipelineBarrier(cmdbuf, .{ .host_bit = true, .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &.{img_barrier});
     }
     { // copy host staging -> device mem
         const buff_img_copy = vk.BufferImageCopy{
@@ -1236,7 +1234,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .image_offset = .{ .x = 0, .y = 0, .z = 0 },
             .image_extent = .{ .width = width, .height = height, .depth = 1 },
         };
-        dev.cmdCopyBufferToImage(cmdbuf, img_staging.buf, tex.img, .transfer_dst_optimal, 1, @ptrCast(&buff_img_copy));
+        dev.cmdCopyBufferToImage(cmdbuf, img_staging.buf, tex.img, .transfer_dst_optimal, &.{buff_img_copy});
     }
     { // transition to read only optimal
         const img_barrier = vk.ImageMemoryBarrier{
@@ -1249,7 +1247,7 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
             .image = tex.img,
             .subresource_range = srr,
         };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, 0, null, 0, null, 1, @ptrCast(&img_barrier));
+        dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{img_barrier});
     }
 
     self.endSingleTimeCommands(cmdbuf) catch unreachable; // submits transfer, waits for it to finish

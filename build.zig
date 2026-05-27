@@ -1,9 +1,5 @@
 const std = @import("std");
 const Build = std.Build;
-const OptimizeMode = std.builtin.OptimizeMode;
-const ResolvedTarget = Build.ResolvedTarget;
-const Dependency = Build.Dependency;
-const sokol = @import("sokol");
 
 const TracyMode = enum {
     off,
@@ -31,8 +27,7 @@ pub fn build(b: *Build) !void {
     // Vulkan
     const vk_registry_opt = b.option([]const u8, "vk_registry", "Path to vulkan registry vk.xml");
     const vk_registry: Build.LazyPath = if (vk_registry_opt) |ps| Build.LazyPath{ .cwd_relative = ps } else blk: {
-        const env = std.process.getEnvMap(b.allocator) catch unreachable;
-        if (env.get("VULKAN_SDK")) |vk_path| {
+        if (b.graph.environ_map.get("VULKAN_SDK")) |vk_path| {
             break :blk Build.LazyPath{ .cwd_relative = b.pathJoin(&.{ vk_path, "share", "vulkan", "registry", "vk.xml" }) };
         }
 
@@ -59,8 +54,7 @@ pub fn build(b: *Build) !void {
     if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
 
     const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse (target.result.os.tag != .windows);
-    const glfw = if (glfw_on) b.lazyDependency("glfw", .{}) else null;
-    const glfw_build = if (glfw_on) b.lazyDependency("glfw_build", .{}) else null;
+    const glfw = if (glfw_on) b.lazyDependency("zglfw", .{}) else null;
 
     // ZTracy
     const ztracy =
@@ -75,7 +69,7 @@ pub fn build(b: *Build) !void {
 
     // DVUI
     const dvui = @import("dvui");
-    const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom });
+    const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom, .@"tree-sitter" = false });
     const dvui_module = dvui_dep.module("dvui");
     const stb_source = "vendor/stb/";
     // dvui deps
@@ -84,17 +78,19 @@ pub fn build(b: *Build) !void {
     dvui_module.addCSourceFiles(.{
         .files = &.{
             stb_source ++ "stb_image_impl.c",
-                // stb_source ++ "stb_image_write_impl.c",
-                // stb_source ++ "stb_image_libc.c",
-                // stb_source ++ "stb_truetype_libc.c",
-                // stb_source ++ "stb_truetype_impl.c",
+            // stb_source ++ "stb_image_write_impl.c",
+            // stb_source ++ "stb_image_libc.c",
+            // stb_source ++ "stb_truetype_libc.c",
+            // stb_source ++ "stb_truetype_impl.c",
         },
         .flags = &.{ "-DINCLUDE_CUSTOM_LIBC_FUNCS=1", "-DSTBI_NO_STDLIB=1", "-DSTBIW_NO_STDLIB=1" },
     });
 
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = if (glfw_on) b.path("src/dvui_vk_glfw.zig") else b.path("src/dvui_vk_win32.zig") });
-    if (glfw_build) |gb| dvui_vk_backend.linkLibrary(gb.artifact("glfw"));
-    if (glfw) |g| dvui_vk_backend.addImport("glfw", g.module("glfw"));
+    if (glfw) |g| {
+        dvui_vk_backend.linkLibrary(g.artifact("glfw"));
+        dvui_vk_backend.addImport("zglfw", g.module("root"));
+    }
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
@@ -125,6 +121,7 @@ pub fn build(b: *Build) !void {
             .name = "app_demo",
             .root_module = exe_mod,
         });
+        if (patchedGlibcLibcFile(b)) |lf| exe.setLibCFile(lf);
         exe.root_module.addImport("dvui", dvui_module);
         exe.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
@@ -146,6 +143,7 @@ pub fn build(b: *Build) !void {
             .name = "standalone_demo",
             .root_module = exe_standalone_mod,
         });
+        if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
         exe_standalone.root_module.addImport("dvui", dvui_module);
         exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
@@ -174,6 +172,34 @@ pub fn build(b: *Build) !void {
     }
 }
 
+// Workaround for glibc 2.43+ (GCC 16) adding .sframe sections with R_X86_64_PC64
+// relocations to crt1.o, which Zig's self-hosted ELF linker can't handle.
+// Strips .sframe from a local copy of crt1.o and produces a libc file pointing at it.
+// Returns null on non-Linux hosts where the issue doesn't apply.
+fn patchedGlibcLibcFile(b: *Build) ?Build.LazyPath {
+    if (b.graph.host.result.os.tag != .linux) return null;
+
+    const patch_dir = b.cache_root.join(b.allocator, &.{"crt-patched"}) catch return null;
+
+    // Copy system CRT files + glibc stubs to our dir, then strip .sframe from crt1.o.
+    // The libc file's crt_dir is also the library search path for glibc stubs (libdl.a etc.),
+    // so we need all small files (*.o, stub *.a < 200KB, linker-script *.so < 10KB) not just CRT.
+    const patch = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt(
+        "CRT1=$(cc -print-file-name=crt1.o 2>/dev/null || echo /usr/lib/crt1.o) && " ++
+        "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
+        "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
+        "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
+        .{patch_dir},
+    ) });
+
+    const wf = b.addWriteFiles();
+    wf.step.dependOn(&patch.step);
+    return wf.add("patched-libc.txt", b.fmt(
+        "include_dir=/usr/include\nsys_include_dir=/usr/include\ncrt_dir={s}\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n",
+        .{patch_dir},
+    ));
+}
+
 pub const Shader = struct {
     name: []const u8,
     path: std.Build.LazyPath,
@@ -190,9 +216,9 @@ pub const ShaderCompileOptions = struct {
 };
 
 pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderCompileOptions) std.ArrayList(Shader) {
-    var shaders: std.ArrayList(Shader) = .{};
+    var shaders: std.ArrayList(Shader) = .empty;
     const cwd = b.build_root.handle;
-    const dir = cwd.openDir(shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}' from '{s}'", .{ shader_subpath, cwd.realpathAlloc(b.allocator, "") catch "OOM" });
+    const dir = cwd.openDir(b.graph.io, shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}'", .{shader_subpath});
     const dbg_print = false;
     if (dbg_print) { // debug print dir
         var dir_path_buf: [256]u8 = undefined;
@@ -200,7 +226,7 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
         std.debug.print("compileShaders({s})\n", .{dir_path});
     }
     var it = dir.iterate();
-    while (it.next() catch unreachable) |f| {
+    while (it.next(b.graph.io) catch unreachable) |f| {
         if (f.kind == .file) {
             const is_glsl =
                 std.mem.endsWith(u8, f.name, ".vert") or
@@ -214,7 +240,7 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
                 if (dbg_print) std.debug.print("slang: {s}\n", .{f.name});
                 const ShaderType = enum { vertex, fragment, compute };
                 _ = ShaderType; // autofix
-                const file_contents = dir.readFileAlloc(b.allocator, f.name, 10 * 1024 * 1024) catch unreachable;
+                const file_contents = dir.readFileAlloc(b.graph.io, f.name, b.allocator, .limited(10 * 1024 * 1024)) catch unreachable;
                 defer b.allocator.free(file_contents);
                 const shader_types: []const []const u8 = &.{ "[shader(\"vertex\")]", "[shader(\"fragment\")]" };
                 const base_name = blk: {

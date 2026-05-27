@@ -6,7 +6,7 @@ const builtin = @import("builtin");
 // taken from dvui web.zig
 // TODO: I don't like another gpa alloc entry point, figure something better
 //
-var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa_instance = std.heap.DebugAllocator(.{}){}; // TODO: proper gpa
 const gpa = gpa_instance.allocator();
 export fn dvui_c_alloc(size: usize) ?*anyopaque {
     const buffer = gpa.alignedAlloc(u8, .@"8", size + 8) catch {

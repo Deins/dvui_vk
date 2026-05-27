@@ -1,23 +1,23 @@
 .{
     .name = .dvui_vk,
     .version = "0.0.0",
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .fingerprint = 0x8c17814f9967671d,
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui.git#c340b88053280e1cf19890e56c797664f9bf7ca2",
-            .hash = "dvui-0.4.0-dev-AQFJmTXU3wBJ2wCYyH4UeUWkMBSJbY7y6Ouc11_Gkls1",
+            .url = "git+https://github.com/david-vanderson/dvui/#733361b177662b75d59d82cea45ab83b673952f8",
+            .hash = "dvui-0.5.0-dev-AQFJmU839gBXoTJ7EucqG3jV9iM9J0N1VYF4sYDNZ-sG",
         },
 
         .vulkan = .{
             //.path = "vulkan-zig",
-            .url = "git+https://github.com/Snektron/vulkan-zig#1446b0b994c2362264cc24513d7c7ec31b469c50",
-            .hash = "vulkan-0.0.0-r7Ytx_VDAwAiMl0YSu2UOkVMIGJN7CeIQaxJR-hUSfD6",
+            .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
+            .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
         },
         .vk_kickstart = .{
-            .url = "git+https://github.com/mikastiv/vk-kickstart#ef671882a3d20f70f74e1ddb6808ed1b55078fa4",
-            .hash = "vk_kickstart-0.1.0-YDdE9PE6AQBxwMK3xIEJf-DInDjsOshqn9ARW5sKyimM",
+            .url = "git+https://github.com/mikastiv/vk-kickstart/#97766e8d2073399f06c882954323e5e85f35baaf",
+            .hash = "vk_kickstart-0.1.0-YDdE9ChKAQDOe_GDNH3-1WKNy7TtSeksA0OTCTv419Cy",
             .lazy = true,
         },
         // required for windows
@@ -27,18 +27,11 @@
             .lazy = true,
         },
 
-        .glfw = .{
-            .url = "git+https://github.com/IridescenceTech/zglfw#188d33b5abdb24768905dec1dad6b3ffd60fc324",
-            .hash = "zglfw-0.1.0-BghZXaTUAAAkCOlD_2akK4k1zIzo6HIXelVZu39yr_MO",
+        .zglfw = .{
+            .url = "git+https://github.com/zig-gamedev/zglfw.git#d9c06187e8b23e91b2ba6865d265e4213e5e7d09",
+            .hash = "zglfw-0.10.0-dev-zgVDNC64IQCeL-_eVOA27Wa50WVitrJswOZVvgcXmIsy",
             .lazy = true,
         },
-        .glfw_build = .{
-            // .path = "glfw.zig",
-            .url = "git+https://github.com/tiawl/glfw.zig#23a6cf3b4691d24c7a026614d86c3c3bc5985642",
-            .hash = "glfw_zig-1.0.0-NrvYo-PXGQCPoUiRdRv27aKZl34nVAWPbhUPs1u0qoLO",
-            .lazy = true,
-        },
-
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",

@@ -22,8 +22,6 @@ const VkContext = DvuiVkBackend.VkContext;
 const vs_spv align(64) = @embedFile("3d.vert.spv").*;
 const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
-const Mat4 = zm.Matrix(4, 4, f32, .{});
-
 /// enables vk 1.3 with dynamic rendering. Gets rid of render passes & framebuffers.
 /// https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html
 const dynamic_rendering = false;
@@ -278,14 +276,15 @@ pub var g_app_state: AppState = undefined;
 pub var g_scene: Scene = undefined;
 
 pub const Scene = struct {
-    timer: std.time.Timer,
+    io: std.Io,
+    timer: std.Io.Timestamp,
     pipeline_layout: vk.PipelineLayout,
     pipeline_cache: ShaderPipelineCache,
 
     zig_model: Model,
     vk_model: Model,
 
-    pub fn init(alloc: std.mem.Allocator, vkc: VkContext) !Scene {
+    pub fn init(alloc: std.mem.Allocator, vkc: VkContext, io: std.Io) !Scene {
         const dev: vk.DeviceProxy = vkc.device;
 
         const layout = try dev.createPipelineLayout(&.{
@@ -336,17 +335,18 @@ pub const Scene = struct {
         });
         errdefer pip_cache.deinit(vkc);
 
-        const zig_model = try Model.initFromFile(alloc, vkc, "zig_logo.glb");
+        const zig_model = try Model.initFromFile(alloc, vkc, io, "zig_logo.glb");
         errdefer zig_model.deinit(alloc, vkc);
-        const vk_model = try Model.initFromFile(alloc, vkc, "vulkan_logo.glb");
+        const vk_model = try Model.initFromFile(alloc, vkc, io, "vulkan_logo.glb");
         errdefer vk_model.deinit(alloc, vkc);
         // create pipelines at load time
         for (zig_model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(zig_model, mesh, vkc);
         for (vk_model.meshes) |mesh| _ = try pip_cache.getOrCreateMeshPipeline(vk_model, mesh, vkc);
 
         return .{
+            .io = io,
             .pipeline_layout = layout,
-            .timer = try std.time.Timer.start(),
+            .timer = std.Io.Timestamp.now(io, .awake),
             .pipeline_cache = pip_cache,
             .zig_model = zig_model,
             .vk_model = vk_model,
@@ -367,28 +367,29 @@ pub const Scene = struct {
         var framebuffer_size = g_app_state.backend.contexts.items[0].last_pixel_size;
         if (framebuffer_size.w < 1) framebuffer_size.w = 1;
         if (framebuffer_size.h < 1) framebuffer_size.h = 1;
-        const viewport = vk.Viewport{
+        const viewports = [_]vk.Viewport{vk.Viewport{
             .x = 0,
             .y = 0,
             .width = framebuffer_size.w,
             .height = framebuffer_size.h,
             .min_depth = 0,
             .max_depth = 1,
-        };
-        dev.cmdSetViewport(cmdbuf, 0, 1, @ptrCast(&viewport));
+        }};
+        dev.cmdSetViewport(cmdbuf, 0, &viewports);
 
-        const scissor = vk.Rect2D{
+        const scissors = [_]vk.Rect2D{vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
             .extent = .{ .width = @intFromFloat(framebuffer_size.w), .height = @intFromFloat(framebuffer_size.h) },
-        };
-        dev.cmdSetScissor(cmdbuf, 0, 1, @ptrCast(&scissor));
+        }};
+        dev.cmdSetScissor(cmdbuf, 0, &scissors);
 
         const PushConstants = extern struct {
             mvp: zm.Mat,
             col: [4]f32 = .{ 1, 1, 1, 1 },
         };
 
-        const t: f32 = @as(f32, @floatFromInt(self.timer.read() / std.time.ns_per_ms)) / 1000; // sec f32
+        const elapsed_ms = self.timer.durationTo(std.Io.Timestamp.now(self.io, .awake)).toMilliseconds();
+        const t: f32 = @as(f32, @floatFromInt(elapsed_ms)) / 1000; // sec f32
         const rotation = zm.mul(zm.rotationX(std.math.sin(t) * 0.5 - std.math.pi * 0.5), zm.rotationY(std.math.sin(t) * 0.7));
         const scaling = zm.scaling(50, 50, 50);
         const model = zm.mul(zm.mul(scaling, rotation), zm.translation(0, 0, -10));
@@ -509,17 +510,17 @@ pub fn main() !void {
     if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
     dvui.Examples.show_demo_window = false;
 
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_instance = std.heap.DebugAllocator(.{}){};
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
+    var threaded: std.Io.Threaded = .init(gpa, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     if (uses_glfw) {
         try glfw.init();
-        var major: i32 = 0;
-        var minor: i32 = 0;
-        var rev: i32 = 0;
-        glfw.getVersion(&major, &minor, &rev);
-        slog.info("GLFW {}.{}.{} vk_support: {}", .{ major, minor, rev, glfw.vulkanSupported() });
+        slog.info("GLFW vk_support: {}", .{glfw.isVulkanSupported()});
     }
     defer if (uses_glfw) glfw.terminate();
 
@@ -527,7 +528,7 @@ pub fn main() !void {
     defer g_app_state.deinit(gpa);
     const vkc = g_app_state.backend.vkc;
 
-    g_scene = try Scene.init(gpa, vkc);
+    g_scene = try Scene.init(gpa, vkc, io);
     defer g_scene.deinit(gpa);
 
     // hijack the dvui pipeline, so that it accepts depth buffer
@@ -556,13 +557,13 @@ pub fn main() !void {
         }
     } else if (uses_glfw) {
         const b = g_app_state.backend;
-        const window = b.contexts.items[0].glfw_win;
-        DvuiVkBackend.registerDvuiIO(window.?); // registers glfw callbacks
+        const window: *glfw.Window = @ptrCast(@alignCast(b.contexts.items[0].glfw_win.?));
+        DvuiVkBackend.registerDvuiIO(window); // registers glfw callbacks
         if (builtin.os.tag == .windows) { // windows blocks event loop while resizing, use separate callback to keep rendering
             _ = glfw.setWindowRefreshCallback(window, &refreshCB);
         }
         while (!glfw.windowShouldClose(window)) {
-            if (glfw.getKey(window, glfw.KeyEscape) == glfw.Press) {
+            if (glfw.getKey(window, .escape) == .press) {
                 glfw.setWindowShouldClose(window, true);
             }
 
@@ -910,15 +911,15 @@ fn createPipeline(
         } else null,
     };
 
-    var pipeline: vk.Pipeline = undefined;
+    const gpci_one = [_]vk.GraphicsPipelineCreateInfo{gpci};
+    var pipeline_one: [1]vk.Pipeline = undefined;
     _ = try dev.createGraphicsPipelines(
         .null_handle,
-        1,
-        @ptrCast(&gpci),
+        &gpci_one,
         vk_alloc,
-        @ptrCast(&pipeline),
+        &pipeline_one,
     );
-    return pipeline;
+    return pipeline_one[0];
 }
 
 // similar dvui_vk_common.acquire.. because of depth buffer
@@ -1023,7 +1024,7 @@ pub const Model = struct {
                     count += 1;
                 }
             }
-            dev.cmdBindVertexBuffers(cmdbuf, 0, @intCast(count), &vert_buffers, &vert_offsets);
+            dev.cmdBindVertexBuffers(cmdbuf, 0, vert_buffers[0..count], vert_offsets[0..count]);
             dev.cmdDrawIndexed(cmdbuf, @intCast(self.indices_len), 1, 0, 0, 0);
         }
     };
@@ -1031,11 +1032,18 @@ pub const Model = struct {
     pub fn initFromFile(
         alloc: std.mem.Allocator,
         vkc: VkContext,
+        io: std.Io,
         relative_path: []const u8,
     ) !Model {
-        const f = try std.fs.cwd().openFile(relative_path, .{});
-        defer f.close();
-        const content = try f.readToEndAllocOptions(alloc, 1024 * 1024 * 128, 1024 * 1024, std.mem.Alignment.@"4", null);
+        const content = try std.Io.Dir.readFileAllocOptions(
+            std.Io.Dir.cwd(),
+            io,
+            relative_path,
+            alloc,
+            std.Io.Limit.limited(1024 * 1024 * 128),
+            std.mem.Alignment.@"4",
+            null,
+        );
         defer alloc.free(content);
         return try initFromBuffer(alloc, content, vkc);
     }
