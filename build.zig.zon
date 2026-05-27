@@ -22,8 +22,8 @@
         },
         // required for windows
         .win32 = .{
-            .url = "git+https://github.com/marlersoft/zigwin32#3cf488b9aabc770c88e50d392c4743635b2de18f",
-            .hash = "win32-25.0.28-preview-mX5pFbUs5QMPgpxcmfqg2Ly-zG_LDeUr9Bp5MDSTFfJQ",
+            .url = "git+https://github.com/kristoff-it/zigwin32.git?ref=fix/zig16#1102e9b82e8bd50913b6a78035bfb399ebd8cf97",
+            .hash = "zigwin32-25.0.28-preview-6BfVhYKN5AOvXPVJq4bGZ7C5dM3PbUra4xhKAKOFJGcF",
             .lazy = true,
         },
 

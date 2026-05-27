@@ -560,7 +560,7 @@ pub fn main() !void {
         const window: *glfw.Window = @ptrCast(@alignCast(b.contexts.items[0].glfw_win.?));
         DvuiVkBackend.registerDvuiIO(window); // registers glfw callbacks
         if (builtin.os.tag == .windows) { // windows blocks event loop while resizing, use separate callback to keep rendering
-            _ = glfw.setWindowRefreshCallback(window, &refreshCB);
+            _ = DvuiVkBackend.setWindowRefreshCallback(window, &refreshCB);
         }
         while (!glfw.windowShouldClose(window)) {
             if (glfw.getKey(window, .escape) == .press) {
@@ -583,7 +583,7 @@ pub fn main() !void {
 pub fn refreshCB(window: *glfw.Window) callconv(.c) void {
     DvuiVkBackend.disable_wait_event = true; // when rendering from damage callback wait for event must be disabled!
     if (uses_glfw) {
-        const ctx: *DvuiVkBackend.WindowContext = @ptrCast(@alignCast(glfw.getWindowUserPointer(window)));
+        const ctx = glfw.getWindowUserPointer(window, DvuiVkBackend.WindowContext).?;
         paint(&g_app_state, ctx) catch {};
     }
     DvuiVkBackend.disable_wait_event = false;

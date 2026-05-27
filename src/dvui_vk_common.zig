@@ -792,7 +792,7 @@ pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
             ) callconv(.winapi) ?std.os.windows.HINSTANCE;
             pub extern "ole32" fn CoInitialize(
                 pvReserved: ?*anyopaque,
-            ) callconv(.winapi) std.os.windows.HRESULT;
+            ) callconv(.winapi) std.os.windows.LONG;
             pub extern "ole32" fn CoUninitialize() callconv(.winapi) void;
         };
 

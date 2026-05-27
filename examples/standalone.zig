@@ -77,7 +77,7 @@ pub fn main() !void {
     if (builtin.target.os.tag == .windows) dvui.Backend.Common.windowsAttachConsole() catch {};
     dvui.Examples.show_demo_window = true;
 
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_instance = std.heap.DebugAllocator(.{}){};
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 

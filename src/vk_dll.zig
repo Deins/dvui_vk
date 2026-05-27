@@ -6,8 +6,13 @@ const std = @import("std");
 const builtin = @import("builtin");
 const slog = std.log.scoped(.vk_dll);
 const vk = @import("vk");
+const windows = std.os.windows;
 
-pub const LibVulkan = if (builtin.target.os.tag == .linux) *anyopaque else std.DynLib;
+pub const LibVulkan = switch (builtin.target.os.tag) {
+    .linux => *anyopaque,
+    .windows => windows.HMODULE,
+    else => @compileError("Platform/OS not implemented"),
+};
 
 pub var libvulkan: ?LibVulkan = null;
 var vk_get_proc_addr: ?vk.PfnGetInstanceProcAddr = null;
@@ -26,7 +31,8 @@ pub fn init() !void {
         },
         .windows => {
             const path = "vulkan-1.dll";
-            libvulkan = try std.DynLib.open(path);
+            const handle = LoadLibraryExW(std.unicode.utf8ToUtf16LeStringLiteral(path), null, 0) orelse return error.DLOpenFailed;
+            libvulkan = handle;
         },
         else => @compileError("Platform/OS not implemented"),
     }
@@ -36,7 +42,8 @@ pub fn deinit() void {
     if (libvulkan == null and vk_get_proc_addr == null) return;
     switch (builtin.target.os.tag) {
         .linux => _ = dlclose(libvulkan.?),
-        else => libvulkan.?.close(),
+        .windows => _ = FreeLibrary(libvulkan.?),
+        else => unreachable,
     }
     libvulkan = null;
     vk_get_proc_addr = null;
@@ -54,7 +61,8 @@ pub fn lookup(T: type, name: [:0]const u8) ?T {
 fn rawLookup(T: type, symbol: [:0]const u8) ?T {
     return switch (builtin.target.os.tag) {
         .linux => @as(T, @ptrCast(dlsym(libvulkan, symbol) orelse return null)),
-        else => libvulkan.?.lookup(T, symbol) orelse null,
+        .windows => @as(T, @ptrCast(GetProcAddress(libvulkan.?, symbol.ptr) orelse return null)),
+        else => null,
     };
 }
 
@@ -74,6 +82,17 @@ const dlerror = std.c.dlerror;
 const dlopen = std.c.dlopen;
 const dlsym = std.c.dlsym;
 const dlclose = std.c.dlclose;
+
+extern "kernel32" fn LoadLibraryExW(
+    lpLibFileName: [*:0]const u16,
+    hFile: ?windows.HANDLE,
+    dwFlags: windows.DWORD,
+) callconv(.winapi) ?windows.HMODULE;
+extern "kernel32" fn FreeLibrary(hLibModule: windows.HMODULE) callconv(.winapi) windows.BOOL;
+extern "kernel32" fn GetProcAddress(
+    hModule: windows.HMODULE,
+    lpProcName: [*:0]const u8,
+) callconv(.winapi) ?*anyopaque;
 
 // I don't think vulkan spec actually requires recursive calls to return same pointer, but we enforce it and it makes good test case
 test "vk_dll_get_proc_itself" {

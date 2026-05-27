@@ -143,11 +143,14 @@ pub const createVkSurface = createVkSurfaceWin32;
 
 /// Get monotonic nanosecond timestamp. Doesn't have to be system time.
 pub fn nanoTime(_: ContextHandle) i128 {
-    return std.time.nanoTimestamp();
+    return std.Io.Timestamp.now(std.Options.debug_io, .awake).nanoseconds;
 }
 
 pub fn sleep(_: ContextHandle, ns: u64) void {
-    std.Thread.sleep(ns);
+    (std.Io.Clock.Duration{
+        .raw = std.Io.Duration.fromNanoseconds(@intCast(ns)),
+        .clock = .awake,
+    }).sleep(std.Options.debug_io) catch {};
 }
 
 /// Called by dvui during `dvui.Window.begin`, so prior to any dvui
@@ -316,7 +319,7 @@ pub fn main() !void {
 
     const app = dvui.App.get() orelse return error.DvuiAppNotDefined;
 
-    var gpa_instance = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_instance = std.heap.DebugAllocator(.{}){};
     const gpa = gpa_instance.allocator();
     defer _ = gpa_instance.deinit();
 
@@ -772,6 +775,7 @@ pub const win = if (is_windows) struct {
                         win32.WM_MOUSEHWHEEL => .horizontal,
                         else => unreachable,
                     },
+                    null,
                 ) catch {};
                 return true;
             },
@@ -803,7 +807,7 @@ pub const win = if (is_windows) struct {
                 };
                 const info: KeystrokeMessageFlags = @bitCast(@as(i32, @truncate(lparam)));
 
-                if (std.meta.intToEnum(win32.VIRTUAL_KEY, wparam)) |as_vkey| {
+                const as_vkey: win32.VIRTUAL_KEY = @enumFromInt(wparam);
                     // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
                     // NOTE: If the key is pressed, the most significant bit is set.
                     //       For a signed integer that means it's a negative number
@@ -836,9 +840,6 @@ pub const win = if (is_windows) struct {
                             .mod = mods,
                         }) catch {};
                     }
-                } else |err| {
-                    slog.err("invalid key found: {}", .{err});
-                }
                 return switch (msg) {
                     // default expected behaviour:
                     // win32.DefWindowProcW(hwnd, umsg, wparam, lparam)

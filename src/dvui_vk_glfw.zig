@@ -661,6 +661,6 @@ pub fn glfwKeyCodeToDvui(keycode: glfw.Key) dvui.enums.Key {
 
 const WindowRefreshFn = *const fn (*glfw.Window) callconv(.c) void;
 extern fn glfwSetWindowRefreshCallback(*glfw.Window, ?WindowRefreshFn) ?WindowRefreshFn;
-fn setWindowRefreshCallback(window: *glfw.Window, callback: ?WindowRefreshFn) ?WindowRefreshFn {
+pub fn setWindowRefreshCallback(window: *glfw.Window, callback: ?WindowRefreshFn) ?WindowRefreshFn {
     return glfwSetWindowRefreshCallback(window, callback);
 }
