@@ -2,7 +2,7 @@
 [![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.2` an newer and `zig v0.15.2` (see tags for older ver)
+Targeting `vulkan 1.2` an newer and `zig v0.16` (see tags for older)
 
 ![screenshot](examples/3d/screenshot.png)
 
@@ -49,3 +49,7 @@ Or alternatively `cd examples/3d` and `zig build run -Dglfw`
 
 ### Standalone example
 Similarly as others only `run` instead of `run-app`. And skip `-Dglfw` - windows native only.
+
+### Cross compilation
+Linux -> windows: `zig build -Dtarget=x86_64-windows`  
+Others untested.

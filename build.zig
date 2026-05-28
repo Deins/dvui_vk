@@ -121,7 +121,9 @@ pub fn build(b: *Build) !void {
             .name = "app_demo",
             .root_module = exe_mod,
         });
-        if (patchedGlibcLibcFile(b)) |lf| exe.setLibCFile(lf);
+        if (target.result.os.tag == .linux) {
+            if (patchedGlibcLibcFile(b)) |lf| exe.setLibCFile(lf);
+        }
         exe.root_module.addImport("dvui", dvui_module);
         exe.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
@@ -143,7 +145,9 @@ pub fn build(b: *Build) !void {
             .name = "standalone_demo",
             .root_module = exe_standalone_mod,
         });
-        if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
+        if (target.result.os.tag == .linux) {
+            if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
+        }
         exe_standalone.root_module.addImport("dvui", dvui_module);
         exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
@@ -172,6 +176,7 @@ pub fn build(b: *Build) !void {
     }
 }
 
+// TODO: get rid of this in future
 // Workaround for glibc 2.43+ (GCC 16) adding .sframe sections with R_X86_64_PC64
 // relocations to crt1.o, which Zig's self-hosted ELF linker can't handle.
 // Strips .sframe from a local copy of crt1.o and produces a libc file pointing at it.
@@ -186,9 +191,9 @@ fn patchedGlibcLibcFile(b: *Build) ?Build.LazyPath {
     // so we need all small files (*.o, stub *.a < 200KB, linker-script *.so < 10KB) not just CRT.
     const patch = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt(
         "CRT1=$(cc -print-file-name=crt1.o 2>/dev/null || echo /usr/lib/crt1.o) && " ++
-        "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
-        "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
-        "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
+            "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
+            "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
+            "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
         .{patch_dir},
     ) });
 

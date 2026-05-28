@@ -48,7 +48,9 @@ pub fn build(b: *Build) !void {
         .name = "3d",
         .root_module = exe_standalone_mod,
     });
-    if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
+    if (target.result.os.tag == .linux) {
+        if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
+    }
     exe_standalone.root_module.addImport("dvui", dvui_module);
     exe_standalone.root_module.addImport("vulkan", vkzig_dep.module("vulkan-zig"));
     // exe_standalone.root_module.addImport("zig_math", b.dependency("zig_math", .{ .target = target }).module("zig_math"));
