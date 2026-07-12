@@ -5,7 +5,7 @@ const vk = @import("vulkan");
 
 const DvuiVkBackend = dvui.backend;
 const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else void;
-const win = if (builtin.target.os.tag == .windows) DvuiVkBackend.win else void;
+const win = if (@hasDecl(DvuiVkBackend, "win")) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
 const slog = std.log.scoped(.main);
 const FrameSync = DvuiVkBackend.FrameSync;
@@ -89,13 +89,21 @@ pub fn main() !void {
         // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
-                for (g_app_state.backend.contexts.items) |ctx| {
+                var i: usize = 0;
+                while (i < g_app_state.backend.contexts.items.len) {
+                    const ctx = g_app_state.backend.contexts.items[i];
                     try paint(&g_app_state, ctx);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
-                        _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
+                        if (builtin.target.os.tag == .windows) {
+                            // Let the Win32 window procedure perform final context cleanup.
+                            _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
+                        } else {
+                            g_app_state.backend.destroyContext(ctx);
+                        }
                         continue;
                     }
+                    i += 1;
                 }
             },
             .quit => break :main_loop,

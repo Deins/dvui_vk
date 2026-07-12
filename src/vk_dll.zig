@@ -60,7 +60,7 @@ pub fn lookup(T: type, name: [:0]const u8) ?T {
 
 fn rawLookup(T: type, symbol: [:0]const u8) ?T {
     return switch (builtin.target.os.tag) {
-        .linux => @as(T, @ptrCast(dlsym(libvulkan, symbol) orelse return null)),
+        .linux => @as(T, @ptrCast(@alignCast(dlsym(libvulkan, symbol) orelse return null))),
         .windows => @as(T, @ptrCast(GetProcAddress(libvulkan.?, symbol.ptr) orelse return null)),
         else => null,
     };

@@ -6,8 +6,8 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui/#733361b177662b75d59d82cea45ab83b673952f8",
-            .hash = "dvui-0.5.0-dev-AQFJmU839gBXoTJ7EucqG3jV9iM9J0N1VYF4sYDNZ-sG",
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#4eb795171d645f0747f14cb3c53bfc794199b685",
+            .hash = "dvui-0.5.0-dev-AQFJmaR7-gD8qpvUvxB3p9S6dtKSymehvDtZYKCaE20r",
         },
 
         .vulkan = .{
@@ -26,12 +26,11 @@
             .hash = "zigwin32-25.0.28-preview-6BfVhYKN5AOvXPVJq4bGZ7C5dM3PbUra4xhKAKOFJGcF",
             .lazy = true,
         },
-
-        .zglfw = .{
-            .url = "git+https://github.com/zig-gamedev/zglfw.git#d9c06187e8b23e91b2ba6865d265e4213e5e7d09",
-            .hash = "zglfw-0.10.0-dev-zgVDNC64IQCeL-_eVOA27Wa50WVitrJswOZVvgcXmIsy",
-            .lazy = true,
+        .low = .{
+            .url = "git+https://github.com/Deins/low#a6a18c6785a3a14dab53ba19479494bcb0bba1bd",
+            .hash = "low-0.1.0-d-W1Kc_7DABx3hMF-XHqAkNMphFjArkgh4BmuId8xbuS",
         },
+
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",

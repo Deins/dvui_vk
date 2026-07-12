@@ -49,12 +49,21 @@ pub fn build(b: *Build) !void {
     const kickstart_dep = b.lazyDependency("vk_kickstart", .{
         .registry = vk_registry,
         .verbose = false,
+        .target = target,
+        .optimize = optimize,
     });
     const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
     if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
 
-    const glfw_on = b.option(bool, "glfw", "Use glfw for input and windowing") orelse (target.result.os.tag != .windows);
-    const glfw = if (glfw_on) b.lazyDependency("zglfw", .{}) else null;
+    const low_on = target.result.os.tag != .windows;
+    const low_x11 = b.option(bool, "low_x11", "Enable X11 in the low backend") orelse (target.result.os.tag == .linux);
+    const low_wayland = b.option(bool, "low_wayland", "Enable Wayland in the low backend") orelse (target.result.os.tag == .linux);
+    const low = if (low_on) b.lazyDependency("low", .{
+        .target = target,
+        .optimize = optimize,
+        .x11 = low_x11,
+        .wayland = low_wayland,
+    }) else null;
 
     // ZTracy
     const ztracy =
@@ -63,6 +72,8 @@ pub fn build(b: *Build) !void {
                 .enable_ztracy = options.ztracy != .off,
                 .enable_fibers = options.ztracy_fibers,
                 .on_demand = options.ztracy == .on_demand,
+                .target = target,
+                .optimize = optimize,
             })
         else
             null;
@@ -86,11 +97,12 @@ pub fn build(b: *Build) !void {
         .flags = &.{ "-DINCLUDE_CUSTOM_LIBC_FUNCS=1", "-DSTBI_NO_STDLIB=1", "-DSTBIW_NO_STDLIB=1" },
     });
 
-    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{ .target = target, .optimize = optimize, .root_source_file = if (glfw_on) b.path("src/dvui_vk_glfw.zig") else b.path("src/dvui_vk_win32.zig") });
-    if (glfw) |g| {
-        dvui_vk_backend.linkLibrary(g.artifact("glfw"));
-        dvui_vk_backend.addImport("zglfw", g.module("root"));
-    }
+    const dvui_vk_backend = b.addModule("dvui_vk_backend", .{
+        .target = target,
+        .optimize = optimize,
+        .root_source_file = if (low_on) b.path("src/dvui_vk_low.zig") else b.path("src/dvui_vk_win32.zig"),
+    });
+    if (low) |l| dvui_vk_backend.addImport("low", l.module("low"));
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
@@ -121,7 +133,7 @@ pub fn build(b: *Build) !void {
             .name = "app_demo",
             .root_module = exe_mod,
         });
-        if (target.result.os.tag == .linux) {
+        if (target.query.isNative() and target.result.os.tag == .linux and target.result.abi == .gnu) {
             if (patchedGlibcLibcFile(b)) |lf| exe.setLibCFile(lf);
         }
         exe.root_module.addImport("dvui", dvui_module);
@@ -135,7 +147,7 @@ pub fn build(b: *Build) !void {
         link_shaders_to.append(b.allocator, exe) catch unreachable;
     }
 
-    if (!glfw_on) {
+    {
         const exe_standalone_mod = b.addModule("standalone_mod", .{
             .root_source_file = b.path("examples/standalone.zig"),
             .target = target,
@@ -145,7 +157,7 @@ pub fn build(b: *Build) !void {
             .name = "standalone_demo",
             .root_module = exe_standalone_mod,
         });
-        if (target.result.os.tag == .linux) {
+        if (target.query.isNative() and target.result.os.tag == .linux and target.result.abi == .gnu) {
             if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
         }
         exe_standalone.root_module.addImport("dvui", dvui_module);

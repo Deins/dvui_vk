@@ -199,8 +199,8 @@ pub fn drawClippedTriangles(ch: ContextHandle, texture: ?dvui.Texture, vtx: []co
 
 /// Create a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreate(ch: ContextHandle, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) TextureError!dvui.Texture {
-    return ch.renderer().textureCreate(pixels, width, height, interpolation);
+pub fn textureCreate(ch: ContextHandle, pixels: [*]const u8, options: dvui.Texture.CreateOptions) TextureError!dvui.Texture {
+    return ch.renderer().textureCreate(pixels, options);
 }
 
 /// Update a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
@@ -220,8 +220,8 @@ pub fn textureDestroy(ch: ContextHandle, texture: dvui.Texture) void {
 
 /// Create a `dvui.Texture` that can be rendered to with `renderTarget`.  The
 /// returned pointer is what will later be passed to `drawClippedTriangles`.
-pub fn textureCreateTarget(ch: ContextHandle, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation, _: dvui.enums.TexturePixelFormat) TextureError!dvui.TextureTarget {
-    return ch.renderer().textureCreateTarget(width, height, interpolation);
+pub fn textureCreateTarget(ch: ContextHandle, options: dvui.Texture.CreateOptions) TextureError!dvui.TextureTarget {
+    return ch.renderer().textureCreateTarget(options);
 }
 
 /// Read pixel data (RGBA) from `texture` into `pixels_out`.
@@ -238,7 +238,7 @@ pub fn textureClearTarget(ch: ContextHandle, texture: dvui.Texture.Target) void 
 /// Destroy `texture` made with `textureCreateTarget`. After this call, this
 /// texture pointer will not be used by dvui.
 pub fn textureDestroyTarget(ch: ContextHandle, texture: dvui.Texture.Target) void {
-    ch.renderer().textureDestroy(.{ .ptr = texture.ptr, .width = texture.width, .height = texture.height, .format = texture.format });
+    ch.renderer().textureDestroy(dvui.Texture.cast(texture));
 }
 
 /// Convert texture target made with `textureCreateTarget` into return texture
@@ -288,9 +288,70 @@ pub fn preferredColorScheme(self: ContextHandle) ?dvui.enums.ColorScheme {
 ///
 /// Returns the previous state of the cursor, `true` meaning shown
 pub fn cursorShow(self: ContextHandle, value: ?bool) GenericError!bool {
-    _ = self; // autofix
-    _ = value; // autofix
+    const hwnd = @as(win32.HWND, @ptrCast(get(self).hwnd));
+    var info: win32.CURSORINFO = undefined;
+    info.cbSize = @sizeOf(win32.CURSORINFO);
+    if (win32.GetCursorInfo(&info) == 0) return error.BackendError;
+    const prev = info.flags == win32.CURSOR_SHOWING;
+    if (value) |shown| {
+        const count = win32.ShowCursor(if (shown) win32.TRUE else win32.FALSE);
+        if (!shown and count > 0) {
+            for (0..@intCast(count)) |_| {
+                if (win32.ShowCursor(win32.FALSE) == 0) break;
+            }
+        }
+    }
+    _ = hwnd;
+    return prev;
 }
+
+/// Set the cursor shape for the window.
+pub fn setCursor(self: ContextHandle, cursor: dvui.enums.Cursor) void {
+    const hwnd = @as(win32.HWND, @ptrCast(get(self).hwnd));
+    if (cursor == .hidden) {
+        _ = self.cursorShow(false) catch |err| {
+            slog.err("Failed to hide cursor: {}", .{err});
+        };
+        return;
+    }
+
+    _ = self.cursorShow(true) catch |err| {
+        slog.err("Failed to show cursor: {}", .{err});
+        return;
+    };
+
+    const converted_cursor = switch (cursor) {
+        .arrow => win32.IDC_ARROW,
+        .ibeam => win32.IDC_IBEAM,
+        .wait, .wait_arrow => win32.IDC_WAIT,
+        .crosshair => win32.IDC_CROSS,
+        .arrow_nw_se => win32.IDC_SIZENWSE,
+        .arrow_ne_sw => win32.IDC_SIZENESW,
+        .arrow_w_e => win32.IDC_SIZEWE,
+        .arrow_n_s => win32.IDC_SIZENS,
+        .arrow_all => win32.IDC_SIZEALL,
+        .bad => win32.IDC_NO,
+        .hand => win32.IDC_HAND,
+        .hidden => unreachable,
+    };
+
+    if (win32.LoadCursorW(null, converted_cursor)) |hcursor| {
+        _ = win32.SetClassLongPtrW(
+            hwnd,
+            win32.GCLP_HCURSOR,
+            @intCast(@intFromPtr(hcursor)),
+        );
+    }
+}
+
+/// Manage text input.
+pub fn textInputRect(_: ContextHandle, _: ?dvui.Rect.Natural) void {}
+
+/// Render the Window to the OS now.
+pub fn renderPresent(_: ContextHandle) void {}
+
+/// Release backend resources.
+pub fn deinit(_: ContextHandle) void {}
 
 /// Called by `dvui.refresh` when it is called from a background
 /// thread.  Used to wake up the gui thread.  It only has effect if you
@@ -808,38 +869,38 @@ pub const win = if (is_windows) struct {
                 const info: KeystrokeMessageFlags = @bitCast(@as(i32, @truncate(lparam)));
 
                 const as_vkey: win32.VIRTUAL_KEY = @enumFromInt(wparam);
-                    // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
-                    // NOTE: If the key is pressed, the most significant bit is set.
-                    //       For a signed integer that means it's a negative number
-                    //       if the key is currently down.
-                    var mods = dvui.enums.Mod.none;
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LSHIFT)) < 0) mods.combine(.lshift);
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RSHIFT)) < 0) mods.combine(.rshift);
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LCONTROL)) < 0) mods.combine(.lcontrol);
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RCONTROL)) < 0) mods.combine(.rcontrol);
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LMENU)) < 0) mods.combine(.lalt);
-                    if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RMENU)) < 0) mods.combine(.ralt);
-                    // Command mods would be the windows key, which we do not handle
+                // https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-getasynckeystate
+                // NOTE: If the key is pressed, the most significant bit is set.
+                //       For a signed integer that means it's a negative number
+                //       if the key is currently down.
+                var mods = dvui.enums.Mod.none;
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LSHIFT)) < 0) mods.combine(.lshift);
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RSHIFT)) < 0) mods.combine(.rshift);
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LCONTROL)) < 0) mods.combine(.lcontrol);
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RCONTROL)) < 0) mods.combine(.rcontrol);
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_LMENU)) < 0) mods.combine(.lalt);
+                if (win32.GetAsyncKeyState(@intFromEnum(win32.VK_RMENU)) < 0) mods.combine(.ralt);
+                // Command mods would be the windows key, which we do not handle
 
-                    const code = convertVKeyToDvuiKey(as_vkey);
+                const code = convertVKeyToDvuiKey(as_vkey);
 
+                _ = dvui_window.addEventKey(.{
+                    .code = code,
+                    .action = switch (msg) {
+                        win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => if (info.was_key_down) .repeat else .down,
+                        win32.WM_KEYUP, win32.WM_SYSKEYUP => .up,
+                        else => unreachable,
+                    },
+                    .mod = mods,
+                }) catch {};
+                // Repeats are counted, so we produce an event for each additional repeat
+                for (1..info.repeat_count) |_| {
                     _ = dvui_window.addEventKey(.{
                         .code = code,
-                        .action = switch (msg) {
-                            win32.WM_KEYDOWN, win32.WM_SYSKEYDOWN => if (info.was_key_down) .repeat else .down,
-                            win32.WM_KEYUP, win32.WM_SYSKEYUP => .up,
-                            else => unreachable,
-                        },
+                        .action = .repeat,
                         .mod = mods,
                     }) catch {};
-                    // Repeats are counted, so we produce an event for each additional repeat
-                    for (1..info.repeat_count) |_| {
-                        _ = dvui_window.addEventKey(.{
-                            .code = code,
-                            .action = .repeat,
-                            .mod = mods,
-                        }) catch {};
-                    }
+                }
                 return switch (msg) {
                     // default expected behaviour:
                     // win32.DefWindowProcW(hwnd, umsg, wparam, lparam)

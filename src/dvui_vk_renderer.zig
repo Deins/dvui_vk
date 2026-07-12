@@ -641,13 +641,23 @@ fn findEmptyTextureSlot(self: *Backend) ?TextureIdx {
     return null;
 }
 
-pub fn textureCreate(self: *Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) dvui.Texture {
-    const slot = self.findEmptyTextureSlot() orelse return .{ .ptr = invalid_texture, .width = 1, .height = 1, .format = .rgba_32 };
+pub fn textureCreate(self: *Backend, pixels: [*]const u8, options: dvui.Texture.CreateOptions) TextureError!dvui.Texture {
+    if (options.format != .rgba_32) return error.TextureCreate;
+
+    const slot = self.findEmptyTextureSlot() orelse return .{
+        .ptr = invalid_texture,
+        .width = 1,
+        .height = 1,
+        .format = .rgba_32,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
     const out_tex: *Texture = &self.textures[slot];
-    const tex = self.createAndUplaodTexture(pixels, width, height, interpolation) catch |err| {
+    const tex = self.createAndUplaodTexture(pixels, options.width, options.height, options.interpolation) catch |err| {
         if (enable_breakpoints) @breakpoint();
         slog.err("Can't create texture: {}", .{err});
-        return .{ .ptr = invalid_texture, .width = 1, .height = 1, .format = .rgba_32 };
+        return error.TextureCreate;
     };
     out_tex.* = tex;
     out_tex.trace.addAddr(@returnAddress(), "create");
@@ -655,17 +665,26 @@ pub fn textureCreate(self: *Backend, pixels: [*]const u8, width: u32, height: u3
     self.stats.textures_alive += 1;
     self.stats.textures_mem += self.dev.getImageMemoryRequirements(out_tex.img).size;
     //slog.debug("textureCreate {} ({x}) | {}", .{ slot, @intFromPtr(out_tex), self.stats.textures_alive });
-    return .{ .ptr = @ptrCast(out_tex), .width = width, .height = height, .format = .rgba_32 };
+    return .{
+        .ptr = @ptrCast(out_tex),
+        .width = options.width,
+        .height = options.height,
+        .format = options.format,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
 }
 
-pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) GenericError!dvui.TextureTarget {
+pub fn textureCreateTarget(self: *Backend, options: dvui.Texture.CreateOptions) TextureError!dvui.TextureTarget {
+    if (options.format != .rgba_32) return error.TextureCreate;
     const tex_slot = self.findEmptyTextureSlot() orelse return error.OutOfMemory;
 
     const dev = self.dev;
     var tex = self.createTextureWithMem(.{
         .image_type = .@"2d",
         .format = img_format,
-        .extent = .{ .width = width, .height = height, .depth = 1 },
+        .extent = .{ .width = options.width, .height = options.height, .depth = 1 },
         .mip_levels = 1,
         .array_layers = 1,
         .samples = .{ .@"1_bit" = true },
@@ -676,7 +695,7 @@ pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolatio
         },
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
-    }, interpolation) catch |err| {
+    }, options.interpolation) catch |err| {
         if (enable_breakpoints) @breakpoint();
         slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
         return error.BackendError;
@@ -688,8 +707,8 @@ pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolatio
         .render_pass = self.render_target_pass,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&tex.img_view),
-        .width = width,
-        .height = height,
+        .width = options.width,
+        .height = options.height,
         .layers = 1,
     }, self.vk_alloc) catch |err| {
         if (enable_breakpoints) @breakpoint();
@@ -701,7 +720,15 @@ pub fn textureCreateTarget(self: *Backend, width: u32, height: u32, interpolatio
     self.textures[tex_slot] = tex;
     self.stats.textures_alive += 1;
     self.stats.textures_mem += self.dev.getImageMemoryRequirements(tex.img).size;
-    return .{ .ptr = &self.textures[tex_slot], .width = width, .height = height, .format = .rgba_32 };
+    return .{
+        .ptr = &self.textures[tex_slot],
+        .width = options.width,
+        .height = options.height,
+        .format = options.format,
+        .interpolation = options.interpolation,
+        .wrap_u = options.wrap_u,
+        .wrap_v = options.wrap_v,
+    };
 }
 pub fn textureRead(self: *Backend, texture: dvui.Texture, pixels_out: [*]u8, width: u32, height: u32) !void {
     slog.debug("textureRead({}, {*}, {}x{}) Not implemented!", .{ texture, pixels_out, width, height });
@@ -733,7 +760,7 @@ pub fn textureReadTarget(self: *Backend, texture: dvui.TextureTarget, pixels_out
 /// used by dvui.
 pub fn textureFromTarget(self: *Backend, texture_target: dvui.TextureTarget) dvui.Texture {
     _ = self; // autofix
-    return .{ .ptr = texture_target.ptr, .width = texture_target.width, .height = texture_target.height, .format = texture_target.format };
+    return dvui.Texture.cast(texture_target);
 }
 
 pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) GenericError!void {

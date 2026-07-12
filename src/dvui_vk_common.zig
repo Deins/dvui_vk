@@ -72,6 +72,9 @@ pub const VkContext = struct {
             slog.err("Failed to create surface!", .{});
             return error.FailedToCreateSurface;
         }
+        errdefer if (window_context.surface != vk.SurfaceKHR.null_handle) {
+            instance.destroySurfaceKHR(window_context.surface, null);
+        };
 
         var select_settings = opt.device_select_settings;
         if (select_settings.surface != .null_handle) unreachable;
@@ -163,6 +166,8 @@ pub const WindowContext = struct {
 
     last_pixel_size: dvui.Size.Physical = .{ .w = 800, .h = 600 },
     last_window_size: dvui.Size.Natural = .{ .w = 800, .h = 600 },
+    last_cursor_x: f64 = 0,
+    last_cursor_y: f64 = 0,
 
     surface: vk.SurfaceKHR = vk.SurfaceKHR.null_handle,
     swapchain_state: ?SwapchainState = null,
@@ -434,6 +439,9 @@ pub const WindowContext = struct {
         self.dvui_window.deinit();
         if (self.swapchain_state) |*s| s.deinit(self);
         self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
+        if (@hasDecl(dvui.backend, "deinitWindow")) {
+            dvui.backend.deinitWindow(self);
+        }
         self.* = undefined;
     }
 
