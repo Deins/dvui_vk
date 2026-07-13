@@ -350,7 +350,7 @@ pub fn clipboardTextSet(self: ContextHandle, text: []const u8) GenericError!void
 /// Open URL in system browser
 pub fn openURL(self: ContextHandle, url: []const u8, new_window: bool) GenericError!void {
     _ = new_window;
-    return dvui_vk_common.openURL(get(self).arena, url);
+    return dvui_vk_common.openURL(get(self).backend.gpa, url);
 }
 
 /// Get the preferredColorScheme if available

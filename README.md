@@ -46,5 +46,16 @@ Or alternatively `cd examples/3d` and `zig build run`
 Similarly as others only `run` instead of `run-app`. Windows native only.
 
 ### Cross compilation
-Linux -> windows: `zig build -Dtarget=x86_64-windows`  
-Others untested.
+
+Build portable binaries by specifying the target explicitly:
+
+```sh
+# Windows (GNU ABI)
+zig build -Dtarget=x86_64-windows-gnu
+
+# Linux with glibc 2.17 as the minimum supported runtime version
+zig build -Dtarget=x86_64-linux-gnu.2.17
+```
+
+The Linux version suffix controls the minimum glibc version required on the
+target system. Adjust it to match the oldest Linux distribution you support.

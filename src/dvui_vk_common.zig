@@ -832,7 +832,7 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     }
 }
 
-pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
+pub fn openURL(gpa: std.mem.Allocator, url: []const u8) !void {
     // precaution as this runs through shell which can get hairy from security perspective
     if (!std.ascii.startsWithIgnoreCase(url, "http://") and !std.ascii.startsWithIgnoreCase(url, "https://")) {
         return error.BackendError;
@@ -857,11 +857,11 @@ pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
 
         if (Win.CoInitialize(null) != 0) return error.BackendError;
         defer Win.CoUninitialize();
-        const wurl = std.unicode.utf8ToUtf16LeAllocZ(arena, url) catch |err| return switch (err) {
+        const wurl = std.unicode.utf8ToUtf16LeAllocZ(gpa, url) catch |err| return switch (err) {
             error.OutOfMemory => error.OutOfMemory,
             else => error.BackendError,
         };
-        defer arena.free(wurl);
+        defer gpa.free(wurl);
 
         const SW_SHOWNORMAL = 1;
         const rc = Win.ShellExecuteW(null, null, @ptrCast(wurl), null, null, SW_SHOWNORMAL);
@@ -872,17 +872,43 @@ pub fn openURL(arena: std.mem.Allocator, url: []const u8) !void {
         return;
     } else if (builtin.os.tag == .linux) {
         const open_cmd = "xdg-open";
-        var child = std.process.spawn(std.Options.debug_io, .{
+        const c_environ = std.c.environ;
+        var env_count: usize = 0;
+        while (c_environ[env_count] != null) : (env_count += 1) {}
+        const environ: [:null]?[*:0]const u8 = @ptrCast(c_environ[0..env_count :null]);
+        var io_threaded = std.Io.Threaded.init(gpa, .{
+            .environ = .{ .block = .{ .slice = environ } },
+        });
+        defer io_threaded.deinit();
+        const io = io_threaded.io();
+        slog.debug("Opening URL with {s}: {s}", .{ open_cmd, url });
+        var child = std.process.spawn(io, .{
             .argv = &.{ open_cmd, url },
             .stdin = .ignore,
             .stdout = .ignore,
             .stderr = .ignore,
         }) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
-            else => return error.BackendError,
+            else => {
+                slog.err("Failed to launch {s} for '{s}': {}", .{ open_cmd, url, err });
+                return error.BackendError;
+            },
         };
-        defer child.kill(std.Options.debug_io);
-        _ = child.wait(std.Options.debug_io) catch return error.BackendError;
+        defer child.kill(io);
+        const term = child.wait(io) catch |err| {
+            slog.err("Failed while waiting for {s} to open '{s}': {}", .{ open_cmd, url, err });
+            return error.BackendError;
+        };
+        switch (term) {
+            .exited => |code| if (code != 0) {
+                slog.err("{s} failed to open '{s}' with exit code {}", .{ open_cmd, url, code });
+                return error.BackendError;
+            },
+            else => {
+                slog.err("{s} failed to open '{s}': {}", .{ open_cmd, url, term });
+                return error.BackendError;
+            },
+        }
         return;
     }
     return error.BackendError;
