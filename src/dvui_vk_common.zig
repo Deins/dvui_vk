@@ -183,6 +183,10 @@ pub const WindowContext = struct {
         images: []vk.Image,
         image_views: []vk.ImageView,
         framebuffers: []vk.Framebuffer = &.{},
+        /// A presentation operation can outlive the graphics submission that
+        /// signals its semaphore.  Therefore these are indexed by acquired
+        /// swapchain image, not by CPU frame-in-flight.
+        render_finished: []vk.Semaphore,
         // options for recreate, cached from init or modified before manually recreating swapchain
         options: Options,
         current_layout: [max_images]vk.ImageLayout = [_]vk.ImageLayout{.undefined} ** max_images, // used only with dynamic_rendering
@@ -197,7 +201,7 @@ pub const WindowContext = struct {
         pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
-            var swapchain = try vkk.Swapchain.create(
+            const swapchain = try vkk.Swapchain.create(
                 gpa,
                 vkc.instance,
                 vkc.device,
@@ -211,15 +215,27 @@ pub const WindowContext = struct {
             if (max_images < swapchain.image_count) unreachable;
 
             const images: []vk.Image = try gpa.alloc(vk.Image, swapchain.image_count);
+            errdefer gpa.free(images);
             try swapchain.getImages(images);
             const image_views = try swapchain.getImageViewsAlloc(gpa, images, vkc.alloc);
+            errdefer {
+                for (image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
+                gpa.free(image_views);
+            }
+            const render_finished = try createRenderFinishedSemaphores(gpa, vkc, swapchain.image_count);
+            errdefer destroyRenderFinishedSemaphores(gpa, vkc, render_finished);
+            const desired_formats = try gpa.dupe(vk.SurfaceFormatKHR, options.desired_formats);
+            errdefer gpa.free(desired_formats);
+            const desired_present_modes = try gpa.dupe(vk.PresentModeKHR, options.desired_present_modes);
+            errdefer gpa.free(desired_present_modes);
             return .{
                 .swapchain = swapchain,
                 .images = images,
                 .image_views = image_views,
+                .render_finished = render_finished,
                 .options = .{
-                    .desired_formats = try gpa.dupe(vk.SurfaceFormatKHR, options.desired_formats),
-                    .desired_present_modes = try gpa.dupe(vk.PresentModeKHR, options.desired_present_modes),
+                    .desired_formats = desired_formats,
+                    .desired_present_modes = desired_present_modes,
                 },
             };
         }
@@ -231,19 +247,31 @@ pub const WindowContext = struct {
         }
 
         pub fn deinit(self: *@This(), ctx: *WindowContext) void {
+            self.destroySwapchainResources(ctx);
+
+            const gpa = ctx.backend.gpa;
+            gpa.free(self.options.desired_present_modes);
+            gpa.free(self.options.desired_formats);
+        }
+
+        fn destroySwapchainResources(self: *@This(), ctx: *WindowContext) void {
             const gpa = ctx.backend.gpa;
             const vkc = ctx.backend.vkc;
-            for (self.framebuffers) |fb| vkc.device.destroyFramebuffer(fb, vkc.alloc);
+
+            for (self.framebuffers) |framebuffer| vkc.device.destroyFramebuffer(framebuffer, vkc.alloc);
             gpa.free(self.framebuffers);
             self.framebuffers = &.{};
+
             for (self.image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
             gpa.free(self.image_views);
             self.image_views = &.{};
+
+            destroyRenderFinishedSemaphores(gpa, vkc, self.render_finished);
+            self.render_finished = &.{};
+
             gpa.free(self.images);
             self.images = &.{};
 
-            gpa.free(self.options.desired_present_modes);
-            gpa.free(self.options.desired_formats);
             vkc.device.destroySwapchainKHR(self.swapchain.handle, vkc.alloc);
         }
 
@@ -273,18 +301,28 @@ pub const WindowContext = struct {
                 },
                 null,
             );
+            errdefer vkc.device.destroySwapchainKHR(new_swapchain.handle, vkc.alloc);
+            if (max_images < new_swapchain.image_count) unreachable;
             // slog.debug("recreated swapchain: {}X {}x{} {}", .{ new_swapchain.image_count, new_swapchain.extent.width, new_swapchain.extent.height, new_swapchain.image_format });
             ctx.last_pixel_size.w = @floatFromInt(new_swapchain.extent.width);
             ctx.last_pixel_size.h = @floatFromInt(new_swapchain.extent.height);
 
-            const options = self.options;
-            self.options = .{};
-            self.deinit(ctx);
-            self.options = options;
-            self.images = try gpa.alloc(vk.Image, self.swapchain.image_count);
+            const new_images = try gpa.alloc(vk.Image, new_swapchain.image_count);
+            errdefer gpa.free(new_images);
+            try new_swapchain.getImages(new_images);
+            const new_image_views = try new_swapchain.getImageViewsAlloc(gpa, new_images, vkc.alloc);
+            errdefer {
+                for (new_image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
+                gpa.free(new_image_views);
+            }
+            const new_render_finished = try createRenderFinishedSemaphores(gpa, vkc, new_swapchain.image_count);
+            errdefer destroyRenderFinishedSemaphores(gpa, vkc, new_render_finished);
+
+            self.destroySwapchainResources(ctx);
             self.swapchain = new_swapchain;
-            try self.swapchain.getImages(self.images);
-            self.image_views = try self.swapchain.getImageViewsAlloc(gpa, self.images, vkc.alloc);
+            self.images = new_images;
+            self.image_views = new_image_views;
+            self.render_finished = new_render_finished;
             self.framebuffers = &.{};
             self.current_layout = [_]vk.ImageLayout{.undefined} ** max_images;
         }
@@ -403,6 +441,25 @@ pub const WindowContext = struct {
             swapchain_state.framebuffers = framebuffers.items;
         }
 
+        fn createRenderFinishedSemaphores(allocator: std.mem.Allocator, vkc: VkContext, count: u32) ![]vk.Semaphore {
+            const semaphores = try allocator.alloc(vk.Semaphore, count);
+            for (semaphores) |*semaphore| semaphore.* = .null_handle;
+            errdefer destroyRenderFinishedSemaphores(allocator, vkc, semaphores);
+
+            const create_info = vk.SemaphoreCreateInfo{};
+            for (semaphores) |*semaphore| {
+                semaphore.* = try vkc.device.createSemaphore(&create_info, vkc.alloc);
+            }
+            return semaphores;
+        }
+
+        fn destroyRenderFinishedSemaphores(allocator: std.mem.Allocator, vkc: VkContext, semaphores: []vk.Semaphore) void {
+            for (semaphores) |semaphore| {
+                if (semaphore != .null_handle) vkc.device.destroySemaphore(semaphore, vkc.alloc);
+            }
+            allocator.free(semaphores);
+        }
+
         pub fn transitionLayout(self: *@This(), cmd: vk.CommandBufferProxy, image_index: usize, layout: vk.ImageLayout) void {
             if (!self.options.dynamic_rendering) unreachable;
             if (layout != .present_src_khr and layout != .color_attachment_optimal) unreachable;
@@ -436,6 +493,10 @@ pub const WindowContext = struct {
     };
 
     pub fn deinit(self: *@This()) void {
+        // Presentation may be running on a distinct queue.  Waiting only for
+        // the graphics queue does not make swapchain images or framebuffers
+        // safe to destroy.
+        self.backend.vkc.device.deviceWaitIdle() catch {};
         self.dvui_window.deinit();
         if (self.swapchain_state) |*s| s.deinit(self);
         self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
@@ -552,12 +613,9 @@ pub const FrameSync = struct {
         /// GPU waits on this before starting rendering commands
         /// Ensures the swapchain image is ready for rendering
         image_available: vk.Semaphore = .null_handle,
-        /// Signaled when rendering commands finish
-        /// Presentation engine waits on this before presenting the image
-        /// GPU → GPU synchronization (graphics → present)
-        render_finished: vk.Semaphore = .null_handle,
         /// CPU waits for GPU to be able to reuse frame resources
         in_flight_fence: vk.Fence = .null_handle,
+        allocation_callbacks: ?*vk.AllocationCallbacks = null,
 
         pub fn init(vkc: VkContext) !Frame {
             const device = vkc.device;
@@ -566,21 +624,18 @@ pub const FrameSync = struct {
             const fence_info = vk.FenceCreateInfo{ .flags = .{ .signaled_bit = true } };
             const image_available = try device.createSemaphore(&semaphore_info, vk_alloc);
             errdefer device.destroySemaphore(image_available, vk_alloc);
-            const render_finished = try device.createSemaphore(&semaphore_info, vk_alloc);
-            errdefer device.destroySemaphore(render_finished, vk_alloc);
             const in_flight_fence = try device.createFence(&fence_info, vk_alloc);
-            errdefer device.destroySemaphore(in_flight_fence, vk_alloc);
+            errdefer device.destroyFence(in_flight_fence, vk_alloc);
             return .{
                 .image_available = image_available,
-                .render_finished = render_finished,
                 .in_flight_fence = in_flight_fence,
+                .allocation_callbacks = vk_alloc,
             };
         }
 
         pub fn deinit(it: Frame, device: vk.DeviceProxy) void {
-            if (it.image_available != .null_handle) device.destroySemaphore(it.image_available, null);
-            if (it.render_finished != .null_handle) device.destroySemaphore(it.render_finished, null);
-            if (it.in_flight_fence != .null_handle) device.destroyFence(it.in_flight_fence, null);
+            if (it.image_available != .null_handle) device.destroySemaphore(it.image_available, it.allocation_callbacks);
+            if (it.in_flight_fence != .null_handle) device.destroyFence(it.in_flight_fence, it.allocation_callbacks);
         }
     };
 
@@ -611,10 +666,6 @@ pub const FrameSync = struct {
 
     pub fn imageAvailableSemaphore(self: @This()) vk.Semaphore {
         return self.items[self.current_frame].image_available;
-    }
-
-    pub fn renderFinished(self: @This()) vk.Semaphore {
-        return self.items[self.current_frame].render_finished;
     }
 
     pub fn begin(sync: *@This(), device: vk.DeviceProxy) vk.DeviceProxy.WaitForFencesError!void {
@@ -659,7 +710,7 @@ pub fn present(
     const vkc = ctx.backend.vkc;
     const wait_semaphores = [_]vk.Semaphore{sync.image_available};
     const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-    const signal_semaphores = [_]vk.Semaphore{sync.render_finished};
+    const signal_semaphores = [_]vk.Semaphore{ctx.swapchain_state.?.render_finished[image_index]};
     const command_buffers = [_]vk.CommandBuffer{command_buffer};
     const submit_info = vk.SubmitInfo{
         .wait_semaphore_count = wait_semaphores.len,

@@ -27,8 +27,8 @@
             .lazy = true,
         },
         .low = .{
-            .url = "git+https://github.com/Deins/low#a6a18c6785a3a14dab53ba19479494bcb0bba1bd",
-            .hash = "low-0.1.0-d-W1Kc_7DABx3hMF-XHqAkNMphFjArkgh4BmuId8xbuS",
+            .url = "git+https://github.com/Deins/low#ea18d1d6824882f63069a9bee0970c14b9734426",
+            .hash = "low-0.1.0-d-W1KUKLDQAwHR8MkFcaDgO6_54HSGOSLxAqwNkZVefg",
         },
 
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
