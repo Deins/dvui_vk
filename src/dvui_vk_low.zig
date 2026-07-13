@@ -119,26 +119,32 @@ pub inline fn renderer(ch: ContextHandle) *VkRenderer {
     return &ch.backend().renderer.?;
 }
 
-fn lowContext() *low.Context {
+pub fn lowContext() *low.Context {
     if (g_low_context) |*ctx| return ctx;
     @panic("low context not initialized");
 }
 
 fn ensureLowContext(gpa: std.mem.Allocator, init_opts: InitOptions) !*low.Context {
+    return initLowContext(gpa, init_opts.backend, init_opts.app_name);
+}
+
+/// Acquires the shared low context for applications that manage their own
+/// Vulkan device setup and create low windows directly.
+pub fn initLowContext(gpa: std.mem.Allocator, backend_request: low.BackendRequest, app_name: [:0]const u8) !*low.Context {
     if (g_low_context) |*ctx| {
         g_low_context_refs += 1;
         return ctx;
     }
 
     g_low_context = try low.Context.init(gpa, .{
-        .backend = init_opts.backend,
-        .app_name = init_opts.app_name,
+        .backend = backend_request,
+        .app_name = app_name,
     });
     g_low_context_refs = 1;
     return lowContext();
 }
 
-fn releaseLowContext(gpa: std.mem.Allocator) void {
+pub fn deinitLowContext(gpa: std.mem.Allocator) void {
     if (g_low_context == null or g_low_context_refs == 0) return;
     g_low_context_refs -= 1;
     if (g_low_context_refs == 0) {
@@ -150,8 +156,10 @@ fn releaseLowContext(gpa: std.mem.Allocator) void {
     }
 }
 
+const releaseLowContext = deinitLowContext;
+
 fn lowWindow(context: *WindowContext) *low.Window {
-    return @as(*low.Window, @ptrCast(@alignCast(context.glfw_win.?)));
+    return @as(*low.Window, @ptrCast(@alignCast(context.low_window.?)));
 }
 
 fn lowSizeToNatural(size: low.Size) dvui.Size.Natural {
@@ -261,7 +269,7 @@ pub fn windowSize(context_handle: ContextHandle) dvui.Size.Natural {
 /// this sets the initial content scale.
 pub fn contentScale(self: ContextHandle) f32 {
     const ctx = get(self);
-    if (ctx.glfw_win) |ptr| {
+    if (ctx.low_window) |ptr| {
         const low_win: *low.Window = @ptrCast(@alignCast(ptr));
         return low_win.getContentScale().x;
     }
@@ -448,9 +456,9 @@ pub fn textInputRect(self: ContextHandle, rect: ?dvui.Rect.Natural) void {
 pub fn renderPresent(_: ContextHandle) void {}
 
 pub fn deinitWindow(self: *WindowContext) void {
-    if (self.glfw_win) |ptr| {
+    if (self.low_window) |ptr| {
         const window: *low.Window = @ptrCast(@alignCast(ptr));
-        self.glfw_win = null;
+        self.low_window = null;
         unregisterWindowContext(self);
         window.deinit();
     }
@@ -629,7 +637,7 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
         .backend = b,
         .dvui_window = undefined,
         .hwnd = if (builtin.os.tag != .windows) {} else undefined,
-        .glfw_win = @ptrCast(created_window),
+        .low_window = @ptrCast(created_window),
         .received_close = false,
         .last_pixel_size = lowSizeToPhysical(created_window.getFramebufferSize()),
         .last_window_size = lowSizeToNatural(created_window.getSize()),

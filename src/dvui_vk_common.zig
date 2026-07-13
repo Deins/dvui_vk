@@ -175,7 +175,7 @@ pub const WindowContext = struct {
     arena: std.mem.Allocator = undefined,
 
     hwnd: if (builtin.os.tag != .windows) void else *anyopaque, // win32.HWND
-    glfw_win: ?*anyopaque = null,
+    low_window: ?*anyopaque = null,
 
     pub const SwapchainState = struct {
         pub const max_images = 4;
