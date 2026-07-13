@@ -5,11 +5,15 @@ on:
   pull_request:
 
 jobs:
-  compile-glfw:
-    name: Build ${{ matrix.os }} glfw
+  build:
+    name: Build ${{ matrix.target }}
     strategy:
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        include:
+          - os: windows-latest
+            target: x86_64-windows-gnu
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu.2.17
     runs-on: ${{ matrix.os }}
     env:
       ZIG_VERSION: 0.16.0
@@ -21,29 +25,9 @@ jobs:
       - name: Install Linux build deps
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libx11-dev
-      - name: Build with GLFW
-        shell: bash
-        run: |
-          set -euo pipefail
-          zig build -Dglfw
-          zig build --build-file ./examples/3d/build.zig -Dglfw
-          ls ./zig-out/bin
-          
-  build-windows-native:
-    runs-on: windows-latest
-    name: Build windows native
-    env:
-      ZIG_VERSION: 0.16.0
-    steps:
-      - uses: actions/checkout@v6
-      - uses: mlugg/setup-zig@v2.0.5
-        with:
-          version: ${{ env.ZIG_VERSION }}
       - name: Build
         shell: bash
         run: |
           set -euo pipefail
-          zig build
-          zig build --build-file ./examples/3d/build.zig
+          zig build -Dtarget=${{ matrix.target }}
           ls ./zig-out/bin
-          
