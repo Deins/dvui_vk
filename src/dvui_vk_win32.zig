@@ -23,6 +23,7 @@ pub const InitOptions = struct {
     icon: ?[]const u8 = null,
 
     vsync: bool,
+    vk_alloc: ?*vk.AllocationCallbacks = null,
 
     max_frames_in_flight: u8 = 2,
     desired_surface_formats: []const vk.SurfaceFormatKHR = &.{
@@ -57,7 +58,7 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     // TODO: on error cleanup here is messy because we need to get surface to init vk. More likely than not if error happens we will leak or crash here.
     const b = try gpa.create(VkBackend);
     errdefer gpa.destroy(b);
-    b.* = VkBackend.init(gpa, undefined);
+    b.* = VkBackend.init(gpa, undefined, init_opts.vk_alloc);
     const window_context: *WindowContext = try b.allocContext();
     window_context.* = .{
         .backend = b,
@@ -66,7 +67,9 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     };
     errdefer window_context.dvui_window.deinit();
     try win.initWindow(window_context, window_class, init_opts);
-    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{});
+    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{
+        .vk_alloc = init_opts.vk_alloc,
+    });
     errdefer b.deinit();
 
     window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
@@ -93,6 +96,7 @@ pub const createFramebuffers = dvui_vk_common.createFramebuffers;
 pub const destroyFramebuffers = dvui_vk_common.destroyFramebuffers;
 pub const FrameSync = dvui_vk_common.FrameSync;
 pub const createCommandBuffers = dvui_vk_common.createCommandBuffers;
+pub const createInstance = dvui_vk_common.VkContext.createInstance;
 pub const present = dvui_vk_common.present;
 
 pub const GenericError = dvui.Backend.GenericError;
@@ -129,7 +133,7 @@ pub fn createVkSurfaceWin32(self: *WindowContext, vk_instance: vk.InstanceProxy)
         .hwnd = @ptrCast(self.hwnd),
         .hinstance = @ptrCast(win32.GetModuleHandleW(null)),
     };
-    self.surface = vk_instance.createWin32SurfaceKHR(&ci, self.backend.vkc.alloc) catch |err| {
+    self.surface = vk_instance.createWin32SurfaceKHR(&ci, self.backend.vk_alloc) catch |err| {
         slog.err("Failed to create surface: {}", .{err});
         return false;
     };

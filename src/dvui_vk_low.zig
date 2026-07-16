@@ -25,6 +25,7 @@ pub const InitOptions = struct {
     icon: ?[]const u8 = null,
 
     vsync: bool,
+    vk_alloc: ?*vk.AllocationCallbacks = null,
 
     max_frames_in_flight: u8 = 2,
     desired_surface_formats: []const vk.SurfaceFormatKHR = &.{
@@ -66,6 +67,7 @@ pub const createFramebuffers = dvui_vk_common.createFramebuffers;
 pub const destroyFramebuffers = dvui_vk_common.destroyFramebuffers;
 pub const FrameSync = dvui_vk_common.FrameSync;
 pub const createCommandBuffers = dvui_vk_common.createCommandBuffers;
+pub const createInstance = dvui_vk_common.VkContext.createInstance;
 pub const present = dvui_vk_common.present;
 pub const AppState = dvui_vk_common.AppState;
 pub var g_app_state: AppState = undefined;
@@ -158,7 +160,7 @@ pub fn deinitLowContext(gpa: std.mem.Allocator) void {
 
 const releaseLowContext = deinitLowContext;
 
-fn lowWindow(context: *WindowContext) *low.Window {
+pub fn lowWindow(context: *WindowContext) *low.Window {
     return @as(*low.Window, @ptrCast(@alignCast(context.low_window.?)));
 }
 
@@ -184,7 +186,7 @@ pub fn createVkSurfaceLow(self: *WindowContext, vk_instance: vk.InstanceProxy) b
             .hinstance = @ptrCast(low_win.nativeDisplay()),
             .hwnd = @ptrFromInt(low_win.nativeSurface()),
         };
-        self.surface = vk_instance.createWin32SurfaceKHR(&ci, self.backend.vkc.alloc) catch |err| {
+        self.surface = vk_instance.createWin32SurfaceKHR(&ci, self.backend.vk_alloc) catch |err| {
             slog.err("Failed to create surface: {}", .{err});
             return false;
         };
@@ -196,7 +198,7 @@ pub fn createVkSurfaceLow(self: *WindowContext, vk_instance: vk.InstanceProxy) b
                 .display = @ptrCast(@alignCast(low_win.nativeDisplay())),
                 .surface = @ptrFromInt(low_win.nativeSurface()),
             };
-            self.surface = vk_instance.createWaylandSurfaceKHR(&ci, null) catch |err| {
+            self.surface = vk_instance.createWaylandSurfaceKHR(&ci, self.backend.vk_alloc) catch |err| {
                 slog.err("Failed to create surface: {}", .{err});
                 return false;
             };
@@ -577,6 +579,14 @@ fn syncWindowState(ctx: *WindowContext) void {
     }
 }
 
+/// Polls low events and synchronizes this window's input and geometry state
+/// with dvui. Applications with custom render loops should call this once per
+/// frame before reading input or drawing the window.
+pub fn pollEvents(ctx: *WindowContext) void {
+    lowContext().pollEvents();
+    syncWindowState(ctx);
+}
+
 fn registerWindowContext(ctx: *WindowContext, gpa: std.mem.Allocator) !void {
     try g_low_window_contexts.append(gpa, ctx);
 }
@@ -591,7 +601,7 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
 
     const b = try gpa.create(VkBackend);
     errdefer gpa.destroy(b);
-    b.* = VkBackend.init(gpa, undefined);
+    b.* = VkBackend.init(gpa, undefined, init_opts.vk_alloc);
     var backend_containers_need_cleanup = true;
     errdefer if (backend_containers_need_cleanup) {
         b.contexts.deinit(gpa);
@@ -651,6 +661,7 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
 
     var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{ .extended_dynamic_state = .true };
     b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceLow, .{
+        .vk_alloc = init_opts.vk_alloc,
         .device_select_settings = .{
             .required_extensions = &.{
                 vk.extensions.khr_swapchain.name,

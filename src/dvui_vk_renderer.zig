@@ -469,6 +469,10 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     self.dev.destroyDescriptorPool(self.dpool, self.vk_alloc);
     self.dev.destroyDescriptorSetLayout(self.dset_layout, self.vk_alloc);
     self.dev.destroyPipelineLayout(self.pipeline_layout, self.vk_alloc);
+    self.dev.destroyPipeline(self.render_target_pipeline, self.vk_alloc);
+    if (self.render_target_pass != .null_handle) {
+        self.dev.destroyRenderPass(self.render_target_pass, self.vk_alloc);
+    }
     self.dev.destroyPipeline(self.pipeline, self.vk_alloc);
     self.dev.unmapMemory(self.host_vis_mem);
     self.dev.freeMemory(self.host_vis_mem, self.vk_alloc);

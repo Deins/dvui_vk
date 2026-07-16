@@ -8,7 +8,6 @@ const zm = @import("zmath");
 const zgltf = @import("zgltf");
 
 const DvuiVkBackend = dvui.backend;
-const win32 = DvuiVkBackend.win32;
 const win = DvuiVkBackend.win;
 const uses_vk_dll = @hasDecl(DvuiVkBackend, "vk_dll");
 const vk_dll = if (uses_vk_dll) DvuiVkBackend.vk_dll else void;
@@ -120,75 +119,28 @@ pub const AppState = struct {
     depth_buffer: DepthBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
-        const window_class = win32.L("DvuiWindow");
-        win.RegisterClass(window_class, .{}) catch win32.panicWin32(
-            "RegisterClass",
-            win32.GetLastError(),
-        );
-
         if (uses_vk_dll) vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
         errdefer if (uses_vk_dll) vk_dll.deinit();
 
         const loader = if (uses_vk_dll) vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}") else DvuiVkBackend.getInstanceProcAddress;
 
-        var b: *DvuiVkBackend.VkBackend = undefined;
-        var window_context: *DvuiVkBackend.WindowContext = undefined;
-        b = try gpa.create(DvuiVkBackend.VkBackend);
-        b.* = DvuiVkBackend.VkBackend.init(gpa, undefined);
-        errdefer b.deinit();
-
-        // init backend (creates and owns OS window)
-        window_context = try b.allocContext();
-        window_context.* = .{
-            .backend = b,
-            .dvui_window = try dvui.Window.init(@src(), gpa, DvuiVkBackend.dvuiBackend(window_context), .{}),
-            .hwnd = undefined,
-        };
-        win.initWindow(window_context, window_class, .{
+        const init_window = try DvuiVkBackend.initWindow(loader, .{
             .dvui_gpa = gpa,
             .gpa = gpa,
             .title = "3d example",
             .vsync = false,
-        }) catch |err| {
-            slog.err("initWindow failed: {}", .{err});
-            return err;
-        };
-
-        var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{ .extended_dynamic_state = .true };
-        b.vkc = try VkContext.init(gpa, loader, window_context, &DvuiVkBackend.createVkSurface, .{
-            .instance_settings = .{
-                .required_api_version = if (dynamic_rendering) vk.API_VERSION_1_3 else vk.API_VERSION_1_2,
-                // .enable_validation = true,
-            },
-            .device_select_settings = .{
-                .required_api_version = if (dynamic_rendering) vk.API_VERSION_1_3 else vk.API_VERSION_1_2,
-                .required_extensions = &.{
-                    vk.extensions.khr_swapchain.name,
-                    vk.extensions.ext_extended_dynamic_state.name, // for dynamic depth on/off
-                },
-                .required_features_13 = .{
-                    .synchronization_2 = .true,
-                    .dynamic_rendering = .true,
-                },
-            },
-            .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
-        });
-
-        const swapchainInit = if (dynamic_rendering) DvuiVkBackend.WindowContext.SwapchainState.initForDynamicRendering else DvuiVkBackend.WindowContext.SwapchainState.init;
-        window_context.swapchain_state = try swapchainInit(window_context, .{
-            .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-            .present_queue_index = b.vkc.physical_device.present_queue_index orelse b.vkc.physical_device.graphics_queue_index,
-            .desired_min_image_count = max_frames_in_flight,
-            .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
-            .desired_formats = &.{
-                // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb backend. To support linear rendering this will be an issue.
-                // TODO: add support for both linear and srgb render targets
-                // similar issue: https://github.com/ocornut/imgui/issues/578
+            .max_frames_in_flight = max_frames_in_flight,
+            .desired_surface_formats = &.{
                 .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
                 .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
             },
-            .desired_present_modes = if (!vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr },
         });
+        const b = init_window.backend;
+        const window_context = init_window.window;
+        errdefer {
+            b.deinit();
+            gpa.destroy(b);
+        }
 
         // const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
         const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
@@ -252,6 +204,7 @@ pub const AppState = struct {
         defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
         defer self.sync.deinit(gpa, self.backend.vkc.device);
         defer gpa.free(self.command_buffers);
+        defer self.depth_buffer.deinit(self.backend.vkc);
     }
 
     pub fn device(self: @This()) vk.DeviceProxy {
@@ -342,9 +295,10 @@ pub const Scene = struct {
     pub fn deinit(self: Scene, alloc: std.mem.Allocator) void {
         const vkc = g_app_state.backend.vkc;
         const dev = g_app_state.backend.vkc.device;
-        dev.destroyPipelineLayout(self.pipeline_layout, vkc.alloc);
+        self.pipeline_cache.deinit(vkc);
         self.zig_model.deinit(alloc, vkc);
         self.vk_model.deinit(alloc, vkc);
+        dev.destroyPipelineLayout(self.pipeline_layout, vkc.alloc);
     }
 
     pub fn draw(self: *Scene, cmdbuf: vk.CommandBuffer) void {
@@ -517,18 +471,23 @@ pub fn main() !void {
 
     defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
-    DvuiVkBackend.windowDamageRefreshCallback = &win32DamageRefresh;
+    if (@hasDecl(DvuiVkBackend, "windowDamageRefreshCallback")) {
+        DvuiVkBackend.windowDamageRefreshCallback = &win32DamageRefresh;
+    }
     main_loop: while (g_app_state.backend.contexts.items.len > 0) {
         // slog.info("frame: {}", .{current_frame_in_flight});
         switch (win.serviceMessageQueue()) {
             .queue_empty => {
-                for (g_app_state.backend.contexts.items) |ctx| {
+                var context_index: usize = 0;
+                while (context_index < g_app_state.backend.contexts.items.len) {
+                    const ctx = g_app_state.backend.contexts.items[context_index];
                     try paint(&g_app_state, ctx);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
-                        _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
+                        g_app_state.backend.destroyContext(ctx);
                         continue;
                     }
+                    context_index += 1;
                 }
             },
             .quit => break :main_loop,
@@ -1103,6 +1062,7 @@ pub const Model = struct {
     }
 
     pub fn deinit(self: @This(), alloc: std.mem.Allocator, vkc: VkContext) void {
+        vkc.device.destroyBuffer(self.buffer, vkc.alloc);
         vkc.device.freeMemory(self.dev_mem, vkc.alloc);
         // alloc.free(self.buffers);
         alloc.free(self.meshes);

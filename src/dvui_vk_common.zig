@@ -17,14 +17,21 @@ pub const VkContext = struct {
     graphics_queue: vk.QueueProxy,
     present_queue: vk.QueueProxy,
     cmd_pool: vk.CommandPool,
+    owns_instance: bool = true,
 
-    pub fn deinit(self: VkContext, alloc: std.mem.Allocator) void {
+    pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
+        self.device.deviceWaitIdle() catch {};
+        self.device.destroyCommandPool(self.cmd_pool, self.alloc);
+        vkk.device.destroy(self.device, alloc, self.alloc);
         self.physical_device.deinit();
-        alloc.destroy(self.instance.wrapper);
-        alloc.destroy(self.device.wrapper);
+        if (self.owns_instance) vkk.instance.destroy(self.instance, alloc, self.alloc);
+        self.* = undefined;
     }
 
     pub const Options = struct {
+        /// Shared by the instance, window surfaces, device, and all child
+        /// Vulkan objects created by this backend.
+        vk_alloc: ?*vk.AllocationCallbacks = null,
         instance_settings: vkk.instance.CreateSettings = .{
             .required_api_version = vk.API_VERSION_1_2,
             // .enable_validation = true,
@@ -39,18 +46,18 @@ pub const VkContext = struct {
         device_create_info_p_next: ?*anyopaque = null,
     };
 
-    pub fn init(
+    /// Creates the Vulkan instance without selecting a device or creating a
+    /// windowing surface. The caller owns the returned instance.
+    pub fn createInstance(
         allocator: std.mem.Allocator,
         loader: anytype,
-        window_context: *WindowContext,
-        createSurface: CreateSurfaceCallback,
         opt: Options,
-    ) !VkContext {
+    ) !vk.InstanceProxy {
         const instance = vkk.instance.create(
             allocator,
             loader,
             opt.instance_settings,
-            null,
+            opt.vk_alloc,
         ) catch blk: {
             slog.err("Failed to get instance! Retrying without validation", .{});
             var instance_settings = opt.instance_settings;
@@ -59,32 +66,32 @@ pub const VkContext = struct {
                 allocator,
                 loader,
                 instance_settings,
-                null,
+                opt.vk_alloc,
             );
         };
-        errdefer instance.destroyInstance(null);
         slog.info("vk instance ok", .{});
+        return instance;
+    }
 
-        // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
-        // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
-
-        if (!createSurface(window_context, instance)) {
-            slog.err("Failed to create surface!", .{});
-            return error.FailedToCreateSurface;
-        }
-        errdefer if (window_context.surface != vk.SurfaceKHR.null_handle) {
-            instance.destroySurfaceKHR(window_context.surface, null);
-        };
-
+    /// Creates the device and queues for an existing Vulkan instance and
+    /// surface. The returned context borrows `instance`; the caller keeps
+    /// ownership of the instance.
+    pub fn initDevice(
+        allocator: std.mem.Allocator,
+        instance: vk.InstanceProxy,
+        surface: vk.SurfaceKHR,
+        opt: Options,
+    ) !VkContext {
         var select_settings = opt.device_select_settings;
         if (select_settings.surface != .null_handle) unreachable;
-        select_settings.surface = window_context.surface;
+        select_settings.surface = surface;
         const physical_device = try vkk.PhysicalDevice.select(allocator, instance, select_settings);
+        errdefer physical_device.deinit();
 
         std.log.info("selected {s}", .{physical_device.name()});
 
-        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(opt.device_create_info_p_next), null);
-        errdefer device.destroyDevice(null);
+        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(opt.device_create_info_p_next), opt.vk_alloc);
+        errdefer vkk.device.destroy(device, allocator, opt.vk_alloc);
 
         const graphics_queue_index = physical_device.graphics_queue_index;
         const present_queue_index = physical_device.present_queue_index;
@@ -96,23 +103,51 @@ pub const VkContext = struct {
         const cmd_pool = try device.createCommandPool(&.{
             .flags = .{ .reset_command_buffer_bit = true },
             .queue_family_index = graphics_queue_index,
-        }, null);
-        errdefer device.destroyCommandPool(cmd_pool, null);
+        }, opt.vk_alloc);
+        errdefer device.destroyCommandPool(cmd_pool, opt.vk_alloc);
 
         return .{
             .instance = instance,
-            // .debug_messenger = debug_messenger,
+            .alloc = opt.vk_alloc,
             .device = device,
             .physical_device = physical_device,
             .graphics_queue = graphics_queue,
             .present_queue = present_queue,
             .cmd_pool = cmd_pool,
+            .owns_instance = false,
         };
+    }
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        loader: anytype,
+        window_context: *WindowContext,
+        createSurface: CreateSurfaceCallback,
+        opt: Options,
+    ) !VkContext {
+        const instance = try createInstance(allocator, loader, opt);
+        errdefer vkk.instance.destroy(instance, allocator, opt.vk_alloc);
+
+        // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
+        // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
+
+        if (!createSurface(window_context, instance)) {
+            slog.err("Failed to create surface!", .{});
+            return error.FailedToCreateSurface;
+        }
+        errdefer if (window_context.surface != vk.SurfaceKHR.null_handle) {
+            instance.destroySurfaceKHR(window_context.surface, opt.vk_alloc);
+        };
+
+        var context = try initDevice(allocator, instance, window_context.surface, opt);
+        context.owns_instance = true;
+        return context;
     }
 };
 
 pub const VkBackend = struct {
     gpa: std.mem.Allocator,
+    vk_alloc: ?*vk.AllocationCallbacks = null,
     contexts: std.ArrayListUnmanaged(*WindowContext) = .empty,
     contexts_pool: std.heap.MemoryPool(WindowContext),
 
@@ -120,9 +155,10 @@ pub const VkBackend = struct {
     renderer: ?VkRenderer = null, // dvui renderer
     prev_frame_stats: VkRenderer.Stats = .{},
 
-    pub fn init(gpa: std.mem.Allocator, vkc: VkContext) VkBackend {
+    pub fn init(gpa: std.mem.Allocator, vkc: VkContext, vk_alloc: ?*vk.AllocationCallbacks) VkBackend {
         return .{
             .gpa = gpa,
+            .vk_alloc = vk_alloc,
             .contexts_pool = .empty,
             .vkc = vkc,
         };
@@ -499,7 +535,9 @@ pub const WindowContext = struct {
         self.backend.vkc.device.deviceWaitIdle() catch {};
         self.dvui_window.deinit();
         if (self.swapchain_state) |*s| s.deinit(self);
-        self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
+        if (self.surface != .null_handle) {
+            self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
+        }
         if (@hasDecl(dvui.backend, "deinitWindow")) {
             dvui.backend.deinitWindow(self);
         }
