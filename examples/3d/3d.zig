@@ -11,7 +11,6 @@ const DvuiVkBackend = dvui.backend;
 const win = DvuiVkBackend.win;
 const uses_vk_dll = @hasDecl(DvuiVkBackend, "vk_dll");
 const vk_dll = if (uses_vk_dll) DvuiVkBackend.vk_dll else void;
-const FrameSync = DvuiVkBackend.FrameSync;
 const slog = std.log.scoped(.main);
 const VkContext = DvuiVkBackend.VkContext;
 
@@ -20,7 +19,7 @@ const fs_spv align(64) = @embedFile("3d.frag.spv").*;
 
 /// enables vk 1.3 with dynamic rendering. Gets rid of render passes & framebuffers.
 /// https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_dynamic_rendering.html
-const dynamic_rendering = false;
+const dynamic_rendering = true;
 
 pub const DepthBuffer = struct {
     image: vk.Image,
@@ -106,6 +105,7 @@ pub const DepthBuffer = struct {
                 },
             };
             cmd.pipelineBarrier2(&.{ .p_image_memory_barriers = @ptrCast(&img_barrier), .image_memory_barrier_count = 1 });
+            self.current_layout = layout;
         }
     }
 };
@@ -114,8 +114,6 @@ pub const AppState = struct {
     gpa: std.mem.Allocator,
     backend: *DvuiVkBackend.VkBackend,
     render_pass: vk.RenderPass,
-    sync: FrameSync,
-    command_buffers: []vk.CommandBuffer,
     depth_buffer: DepthBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
@@ -130,9 +128,9 @@ pub const AppState = struct {
             .title = "3d example",
             .vsync = false,
             .max_frames_in_flight = max_frames_in_flight,
-            .desired_surface_formats = &.{
-                .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
-                .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
+            .color_formats = &.{
+                .a2b10g10r10_unorm_pack32,
+                .b8g8r8a8_unorm,
             },
         });
         const b = init_window.backend;
@@ -142,12 +140,8 @@ pub const AppState = struct {
             gpa.destroy(b);
         }
 
-        // const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-        const render_pass = try createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-        errdefer b.vkc.device.destroyRenderPass(render_pass, null);
-
-        const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
-        errdefer gpa.free(command_buffers);
+        const render_pass = vk.RenderPass.null_handle;
+        const color_format: vk.Format = @enumFromInt(window_context.render_target.?.colorFormat());
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,
@@ -159,16 +153,13 @@ pub const AppState = struct {
                 .dynamic = vk.PipelineRenderingCreateInfo{
                     .color_attachment_count = 1,
                     .view_mask = 0,
-                    .p_color_attachment_formats = &[_]vk.Format{.a2b10g10r10_unorm_pack32}, // todo: get actual
+                    .p_color_attachment_formats = &.{color_format},
                     .depth_attachment_format = DepthBuffer.format,
                     .stencil_attachment_format = .undefined,
                 },
             } else .{ .static = render_pass },
             .max_frames_in_flight = max_frames_in_flight,
         });
-
-        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
-        errdefer sync.deinit(gpa, b.vkc.device);
 
         const depth_buffer = try DepthBuffer.init(
             b.vkc,
@@ -180,30 +171,15 @@ pub const AppState = struct {
         return .{
             .gpa = gpa,
             .backend = b,
-            .command_buffers = command_buffers,
             .render_pass = render_pass,
-            .sync = sync,
             .depth_buffer = depth_buffer,
         };
-    }
-
-    pub fn recreateSwapchain(self: *@This(), ctx: *DvuiVkBackend.WindowContext) !void {
-        try ctx.swapchain_state.?.recreate(ctx);
-        self.depth_buffer.deinit(g_app_state.device());
-        self.depth_buffer = try DepthBuffer.init(
-            self.backend.vkc.device,
-            .{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) },
-            self.backend.renderer.?.device_local_mem_idx,
-        );
     }
 
     pub fn deinit(self: AppState, gpa: std.mem.Allocator) void {
         defer if (uses_vk_dll) vk_dll.deinit();
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
-        defer self.backend.vkc.device.destroyRenderPass(self.render_pass, null);
-        defer self.sync.deinit(gpa, self.backend.vkc.device);
-        defer gpa.free(self.command_buffers);
         defer self.depth_buffer.deinit(self.backend.vkc);
     }
 
@@ -508,12 +484,9 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
         _ = dvui.checkbox(@src(), &dvui.Examples.show_demo_window, "Show dvui demo", .{});
 
         if (dvui.checkbox(@src(), &vsync, "vsync", .{})) {
-            const alloc = g_app_state.gpa;
-            if (alloc.dupe(vk.PresentModeKHR, if (!vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr })) |new| {
-                alloc.free(ctx.swapchain_state.?.options.desired_present_modes);
-                ctx.swapchain_state.?.options.desired_present_modes = new;
-                ctx.recreate_swapchain_requested = true;
-            } else |_| vsync = !vsync;
+            ctx.render_target.?.setVSync(if (vsync) .on else .off) catch {
+                vsync = !vsync;
+            };
         }
 
         if (dvui.checkbox(@src(), &sleep_when_no_events, "sleep when no events", .{})) {}
@@ -530,80 +503,53 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
 
 pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     const b = ctx.backend;
-    const gpa = b.gpa;
-    const render_pass = app_state.render_pass;
-    const sync = &app_state.sync;
     const device = b.vkc.device;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    // wait for previous frame to finish
-    try sync.begin(device);
-    defer sync.end();
-    const image_index = try acquireImageMaybeRecreate(
-        &ctx.swapchain_state.?,
-        gpa,
-        ctx,
-        sync.*,
-
-        render_pass,
-        b.renderer.?.device_local_mem_idx,
-    );
-
-    const framebuffer = if (dynamic_rendering) void else ctx.swapchain_state.?.framebuffers[image_index];
-    const command_buffer = app_state.command_buffers[sync.current_frame];
-    try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
+    var frame = ctx.render_target.?.acquire() catch |err| switch (err) {
+        error.FrameSkipped, error.FrameOutOfDate => return,
+        else => return err,
+    };
+    defer frame.abort();
+    const frame_extent: vk.Extent2D = .{ .width = frame.extent.width, .height = frame.extent.height };
+    if (app_state.depth_buffer.size.width != frame_extent.width or app_state.depth_buffer.size.height != frame_extent.height) {
+        try device.deviceWaitIdle();
+        app_state.depth_buffer.deinit(b.vkc);
+        app_state.depth_buffer = try DepthBuffer.init(b.vkc, frame_extent, b.renderer.?.device_local_mem_idx);
+    }
+    const command_buffer = frame.commandBuffer(vk.CommandBuffer);
     const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
 
-    const clear_values = [_]vk.ClearValue{
-        .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
-        .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
-    };
-    const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
+    const extent = frame_extent;
 
-    if (dynamic_rendering) {
-        g_app_state.depth_buffer.transitionLayout(cmd, .depth_attachment_optimal);
-        ctx.swapchain_state.?.transitionLayout(cmd, image_index, .color_attachment_optimal);
-        const framebuffer_size = g_app_state.backend.contexts.items[0].last_pixel_size;
-        cmd.beginRendering(&.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = @intFromFloat(framebuffer_size.w), .height = @intFromFloat(framebuffer_size.h) } },
-            .view_mask = 0,
-            .layer_count = 1,
-            .color_attachment_count = 1,
-            .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
-                .image_view = ctx.swapchain_state.?.image_views[image_index],
-                .image_layout = .color_attachment_optimal,
-                .resolve_mode = .{},
-                .resolve_image_view = .null_handle,
-                .resolve_image_layout = .color_attachment_optimal,
-                .load_op = .clear,
-                .store_op = .store,
-                .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
-            }},
-            .p_depth_attachment = &.{
-                .image_view = g_app_state.depth_buffer.view,
-                .image_layout = .depth_attachment_optimal,
-                .resolve_mode = .{},
-                .resolve_image_view = .null_handle,
-                .resolve_image_layout = .depth_attachment_optimal,
-                .load_op = .clear,
-                .store_op = .store,
-                .clear_value = .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
-            },
-        });
-    } else {
-        const render_pass_begin_info = vk.RenderPassBeginInfo{
-            .render_pass = render_pass,
-            .framebuffer = framebuffer,
-            .render_area = .{
-                .offset = .{ .x = 0, .y = 0 },
-                .extent = extent,
-            },
-            .clear_value_count = clear_values.len,
-            .p_clear_values = &clear_values,
-        };
-        cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
-    }
+    g_app_state.depth_buffer.transitionLayout(cmd, .depth_attachment_optimal);
+    cmd.beginRendering(&.{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .view_mask = 0,
+        .layer_count = 1,
+        .color_attachment_count = 1,
+        .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
+            .image_view = frame.imageView(vk.ImageView),
+            .image_layout = .color_attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_view = .null_handle,
+            .resolve_image_layout = .color_attachment_optimal,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
+        }},
+        .p_depth_attachment = &.{
+            .image_view = g_app_state.depth_buffer.view,
+            .image_layout = .depth_attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_view = .null_handle,
+            .resolve_image_layout = .depth_attachment_optimal,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .depth_stencil = .{ .depth = 1.0, .stencil = 0 } },
+        },
+    });
 
     cmd.setDepthTestEnableEXT(.true);
     cmd.setDepthWriteEnableEXT(.true);
@@ -634,22 +580,8 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     }
 
-    if (dynamic_rendering) {
-        cmd.endRendering();
-        ctx.swapchain_state.?.transitionLayout(cmd, image_index, .present_src_khr);
-    } else cmd.endRenderPass();
-    cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
-
-    if (!try DvuiVkBackend.present(
-        ctx,
-        command_buffer,
-        sync.items[sync.current_frame],
-        ctx.swapchain_state.?.swapchain.handle,
-        image_index,
-    )) {
-        // ctx.recreate_swapchain_requested = true;
-        slog.err("present failed!", .{});
-    }
+    cmd.endRendering();
+    try frame.submitAndPresent(.{});
     // slog.debug("frame done", .{});
 
     // sleep when nothing to do
@@ -813,7 +745,7 @@ fn createPipeline(
         .p_next = if (dynamic_rendering) &vk.PipelineRenderingCreateInfo{
             .color_attachment_count = 1,
             .view_mask = 0,
-            .p_color_attachment_formats = &[_]vk.Format{.a2b10g10r10_unorm_pack32}, // todo: get actual
+            .p_color_attachment_formats = &[_]vk.Format{@enumFromInt(g_app_state.backend.contexts.items[0].render_target.?.colorFormat())},
             .depth_attachment_format = DepthBuffer.format,
             .stencil_attachment_format = .undefined,
         } else null,
@@ -828,57 +760,6 @@ fn createPipeline(
         &pipeline_one,
     );
     return pipeline_one[0];
-}
-
-// similar dvui_vk_common.acquire.. because of depth buffer
-pub fn acquireImageMaybeRecreate(
-    swapchain_state: *DvuiVkBackend.WindowContext.SwapchainState,
-    gpa: std.mem.Allocator,
-    ctx: *DvuiVkBackend.WindowContext,
-    sync: FrameSync,
-    render_pass: vk.RenderPass, // for framebuffer recreate
-    device_local_mem_idx: u32, // mem where to create depth buffer
-) !u32 {
-    const vkc = ctx.backend.vkc;
-    const device = vkc.device;
-    const image_index = blk: while (true) {
-        if (try swapchain_state.maybeRecreate(ctx)) {
-            // recreate depth
-            g_app_state.depth_buffer.deinit(vkc);
-            g_app_state.depth_buffer = try DepthBuffer.init(
-                vkc,
-                ctx.swapchain_state.?.swapchain.extent,
-                device_local_mem_idx,
-            );
-        }
-        const shared_attachments = &[1]vk.ImageView{g_app_state.depth_buffer.view};
-        if (!dynamic_rendering) _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
-
-        const next_image_result = device.acquireNextImageKHR(
-            ctx.swapchain_state.?.swapchain.handle,
-            std.math.maxInt(u64),
-            sync.imageAvailableSemaphore(),
-            .null_handle,
-        ) catch |err| {
-            if (err == error.OutOfDateKHR) {
-                ctx.recreate_swapchain_requested = true;
-                continue;
-            }
-            return err;
-        };
-        switch (next_image_result.result) {
-            .success => {},
-            .suboptimal_khr => {
-                ctx.recreate_swapchain_requested = true;
-                // its stil valid to render, lets try to run with it for 1 frame
-                // continue;
-            },
-            else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
-        }
-        break :blk next_image_result.image_index;
-    };
-    // slog.debug("acq {}", .{image_index});
-    return image_index; // autofix
 }
 
 pub const Model = struct {

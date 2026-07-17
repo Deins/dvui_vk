@@ -69,6 +69,10 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     try win.initWindow(window_context, window_class, init_opts);
     b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceWin32, .{
         .vk_alloc = init_opts.vk_alloc,
+        .instance_extensions = &.{
+            vk.extensions.khr_surface.name,
+            vk.extensions.khr_win_32_surface.name,
+        },
     });
     errdefer b.deinit();
 
@@ -372,7 +376,6 @@ test {
 //
 //  APP
 //
-pub const vkk = @import("vk_kickstart");
 pub const vk_dll = @import("vk_dll.zig");
 
 pub const AppState = dvui_vk_common.AppState;

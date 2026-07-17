@@ -1,30 +1,59 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const vk = @import("vk");
-const vkk = @import("vk_kickstart");
+const low = @import("low");
 const dvui = @import("dvui");
 const VkRenderer = @import("dvui_vk_renderer.zig");
 const slog = std.log.scoped(.dvui_vk_common);
-
-pub const CreateSurfaceCallback = *const fn (window_context: *WindowContext, instance: vk.InstanceProxy) bool;
-
+const Targets = low.vulkan.targets();
 /// global vulkan context
 pub const VkContext = struct {
     alloc: ?*vk.AllocationCallbacks = null,
     instance: vk.InstanceProxy,
-    physical_device: vkk.PhysicalDevice,
+    physical_device: PhysicalDevice,
     device: vk.DeviceProxy,
     graphics_queue: vk.QueueProxy,
     present_queue: vk.QueueProxy,
     cmd_pool: vk.CommandPool,
+    low_loader: ?low.vulkan.Loader = null,
+    low_instance: low.vulkan.Instance = undefined,
+    low_device: low.vulkan.Device = undefined,
+    instance_wrapper: ?*vk.InstanceWrapper = null,
+    device_wrapper: ?*vk.DeviceWrapper = null,
+    owns_device: bool = true,
     owns_instance: bool = true,
 
+    /// Binding-native physical-device information retained by the backend.
+    /// It intentionally contains no allocator-owned selection state.
+    pub const PhysicalDevice = struct {
+        handle: vk.PhysicalDevice,
+        properties: vk.PhysicalDeviceProperties,
+        memory_properties: vk.PhysicalDeviceMemoryProperties,
+        graphics_queue_index: u32,
+        present_queue_index: ?u32,
+    };
+
+    /// Resources supplied by an embedding application. The backend creates
+    /// only its command pool and never destroys the instance, device, queues,
+    /// or dispatch wrappers.
+    pub const ExternalDevice = struct {
+        instance: vk.InstanceProxy,
+        physical_device: PhysicalDevice,
+        device: vk.DeviceProxy,
+        graphics_queue: vk.Queue,
+        present_queue: vk.Queue,
+    };
+
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
-        self.device.deviceWaitIdle() catch {};
+        if (self.owns_device) self.device.deviceWaitIdle() catch {};
         self.device.destroyCommandPool(self.cmd_pool, self.alloc);
-        vkk.device.destroy(self.device, alloc, self.alloc);
-        self.physical_device.deinit();
-        if (self.owns_instance) vkk.instance.destroy(self.instance, alloc, self.alloc);
+        // low's device helper currently creates the device without allocation
+        // callbacks, so destruction must use the same allocator contract.
+        if (self.owns_device) self.device.destroyDevice(null);
+        if (self.device_wrapper) |wrapper| alloc.destroy(wrapper);
+        if (self.owns_instance) self.instance.destroyInstance(self.alloc);
+        if (self.instance_wrapper) |wrapper| alloc.destroy(wrapper);
+        if (self.low_loader) |*loader| loader.deinit();
         self.* = undefined;
     }
 
@@ -32,88 +61,113 @@ pub const VkContext = struct {
         /// Shared by the instance, window surfaces, device, and all child
         /// Vulkan objects created by this backend.
         vk_alloc: ?*vk.AllocationCallbacks = null,
-        instance_settings: vkk.instance.CreateSettings = .{
-            .required_api_version = vk.API_VERSION_1_2,
-            // .enable_validation = true,
-        },
-        device_select_settings: vkk.PhysicalDevice.SelectSettings = .{
-            .required_api_version = vk.API_VERSION_1_2,
-            .required_extensions = &.{
-                vk.extensions.khr_swapchain.name,
-            },
+        instance_extensions: []const [*:0]const u8 = &.{},
+        device_extensions: []const [*:0]const u8 = &.{vk.extensions.khr_swapchain.name},
+        required_api_version: vk.Version = vk.API_VERSION_1_3,
+        required_features: vk.PhysicalDeviceFeatures = .{},
+        required_features_13: ?vk.PhysicalDeviceVulkan13Features = .{
+            .synchronization_2 = .true,
+            .dynamic_rendering = .true,
         },
         /// use to attach extension feature bits etc. to VkDeviceCreateInfo chain
         device_create_info_p_next: ?*anyopaque = null,
     };
 
-    /// Creates the Vulkan instance without selecting a device or creating a
-    /// windowing surface. The caller owns the returned instance.
+    pub const Instance = struct {
+        allocator: std.mem.Allocator,
+        wrapper: *vk.InstanceWrapper,
+        proxy: vk.InstanceProxy,
+
+        pub fn deinit(self: *@This(), vk_alloc: ?*vk.AllocationCallbacks) void {
+            self.proxy.destroyInstance(vk_alloc);
+            self.allocator.destroy(self.wrapper);
+            self.* = undefined;
+        }
+    };
+
+    /// Creates an owned, binding-native Vulkan instance. The supplied loader
+    /// must remain valid while the resulting instance is in use.
     pub fn createInstance(
         allocator: std.mem.Allocator,
         loader: anytype,
         opt: Options,
-    ) !vk.InstanceProxy {
-        const instance = vkk.instance.create(
-            allocator,
-            loader,
-            opt.instance_settings,
-            opt.vk_alloc,
-        ) catch blk: {
-            slog.err("Failed to get instance! Retrying without validation", .{});
-            var instance_settings = opt.instance_settings;
-            instance_settings.enable_validation = false;
-            break :blk try vkk.instance.create(
-                allocator,
-                loader,
-                instance_settings,
-                opt.vk_alloc,
-            );
+    ) !Instance {
+        const base = vk.BaseWrapper.load(loader);
+        const app_info = vk.ApplicationInfo{
+            .p_application_name = "dvui_vk",
+            .application_version = 0,
+            .p_engine_name = "dvui_vk",
+            .engine_version = 0,
+            .api_version = @bitCast(opt.required_api_version),
         };
-        slog.info("vk instance ok", .{});
-        return instance;
+        const wrapper = try allocator.create(vk.InstanceWrapper);
+        errdefer allocator.destroy(wrapper);
+        const handle = try base.createInstance(&.{
+            .p_application_info = &app_info,
+            .enabled_extension_count = @intCast(opt.instance_extensions.len),
+            .pp_enabled_extension_names = opt.instance_extensions.ptr,
+        }, opt.vk_alloc);
+        wrapper.* = vk.InstanceWrapper.load(handle, loader);
+        return .{ .allocator = allocator, .wrapper = wrapper, .proxy = vk.InstanceProxy.init(handle, wrapper) };
     }
 
-    /// Creates the device and queues for an existing Vulkan instance and
-    /// surface. The returned context borrows `instance`; the caller keeps
-    /// ownership of the instance.
+    /// Creates the device and queues for an existing Vulkan instance. The
+    /// returned context borrows `instance`; the caller keeps ownership of it.
     pub fn initDevice(
         allocator: std.mem.Allocator,
         instance: vk.InstanceProxy,
-        surface: vk.SurfaceKHR,
+        presentation: ?low.vulkan.PresentationSupport,
         opt: Options,
     ) !VkContext {
-        var select_settings = opt.device_select_settings;
-        if (select_settings.surface != .null_handle) unreachable;
-        select_settings.surface = surface;
-        const physical_device = try vkk.PhysicalDevice.select(allocator, instance, select_settings);
-        errdefer physical_device.deinit();
-
-        std.log.info("selected {s}", .{physical_device.name()});
-
-        const device = try vkk.device.create(allocator, instance, &physical_device, @ptrCast(opt.device_create_info_p_next), opt.vk_alloc);
-        errdefer vkk.device.destroy(device, allocator, opt.vk_alloc);
-
-        const graphics_queue_index = physical_device.graphics_queue_index;
-        const present_queue_index = physical_device.present_queue_index;
-        const graphics_queue_handle = device.getDeviceQueue(graphics_queue_index, 0);
-        const present_queue_handle = if (present_queue_index) |pq| device.getDeviceQueue(pq, 0) else graphics_queue_handle;
+        // low owns the binding-aware capability checks, queue selection, and
+        // device-create feature chain. It returns the same native vulkan-zig
+        // handles used by the rest of this backend.
+        var low_loader = try low.vulkan.Loader.init();
+        errdefer low_loader.deinit();
+        const low_instance = try low_loader.loadInstanceApi(low.vulkan.toInstance(instance.handle));
+        const selection = try Targets.findDevice(vk, allocator, instance, &low_instance, .{
+            .presentation = presentation,
+            .requirements = .{
+                .required_api_version = opt.required_api_version,
+                .required_extensions = opt.device_extensions,
+                .required_features = opt.required_features,
+                .required_features_13 = opt.required_features_13,
+                .extra_features = opt.device_create_info_p_next,
+            },
+        });
+        var device_resources = try Targets.createDevice(vk, allocator, instance, &low_instance, selection);
+        errdefer device_resources.deinit();
+        const device = device_resources.device;
+        const wrapper = device_resources.wrapper;
+        const graphics_queue_handle = device_resources.graphics_queue;
+        const present_queue_handle = device_resources.present_queue;
+        const physical_device = PhysicalDevice{
+            .handle = selection.physical_device,
+            .properties = instance.getPhysicalDeviceProperties(selection.physical_device),
+            .memory_properties = instance.getPhysicalDeviceMemoryProperties(selection.physical_device),
+            .graphics_queue_index = selection.graphics_queue_family,
+            .present_queue_index = selection.present_queue_family,
+        };
         const graphics_queue = vk.QueueProxy.init(graphics_queue_handle, device.wrapper);
         const present_queue = vk.QueueProxy.init(present_queue_handle, device.wrapper);
 
         const cmd_pool = try device.createCommandPool(&.{
             .flags = .{ .reset_command_buffer_bit = true },
-            .queue_family_index = graphics_queue_index,
+            .queue_family_index = selection.graphics_queue_family,
         }, opt.vk_alloc);
-        errdefer device.destroyCommandPool(cmd_pool, opt.vk_alloc);
 
         return .{
             .instance = instance,
             .alloc = opt.vk_alloc,
             .device = device,
+            .device_wrapper = wrapper,
             .physical_device = physical_device,
             .graphics_queue = graphics_queue,
             .present_queue = present_queue,
             .cmd_pool = cmd_pool,
+            .low_loader = low_loader,
+            .low_instance = low_instance,
+            .low_device = device_resources.low_device,
             .owns_instance = false,
         };
     }
@@ -121,30 +175,48 @@ pub const VkContext = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         loader: anytype,
-        window_context: *WindowContext,
-        createSurface: CreateSurfaceCallback,
+        presentation: ?low.vulkan.PresentationSupport,
         opt: Options,
     ) !VkContext {
-        const instance = try createInstance(allocator, loader, opt);
-        errdefer vkk.instance.destroy(instance, allocator, opt.vk_alloc);
+        var instance = try createInstance(allocator, loader, opt);
+        errdefer instance.deinit(opt.vk_alloc);
 
-        // const debug_messenger = try vkk.instance.createDebugMessenger(instance_handle, .{}, null);
-        // errdefer vkk.instance.destroyDebugMessenger(instance_handle, debug_messenger, null);
-
-        if (!createSurface(window_context, instance)) {
-            slog.err("Failed to create surface!", .{});
-            return error.FailedToCreateSurface;
-        }
-        errdefer if (window_context.surface != vk.SurfaceKHR.null_handle) {
-            instance.destroySurfaceKHR(window_context.surface, opt.vk_alloc);
-        };
-
-        var context = try initDevice(allocator, instance, window_context.surface, opt);
+        var context = try initDevice(allocator, instance.proxy, presentation, opt);
         context.owns_instance = true;
+        context.instance_wrapper = instance.wrapper;
         return context;
+    }
+
+    /// Borrows a host application's Vulkan instance, device, and queues.
+    /// The host retains ownership and must keep the proxies and wrappers alive
+    /// until this backend has been deinitialized.
+    pub fn initExternal(resources: ExternalDevice, vk_alloc: ?*vk.AllocationCallbacks) !VkContext {
+        var low_loader = try low.vulkan.Loader.init();
+        errdefer low_loader.deinit();
+        const low_instance = try low_loader.loadInstanceApi(low.vulkan.toInstance(resources.instance.handle));
+        const low_device = try low.vulkan.Device.init(&low_instance, low.vulkan.toDevice(resources.device.handle));
+        const cmd_pool = try resources.device.createCommandPool(&.{
+            .flags = .{ .reset_command_buffer_bit = true },
+            .queue_family_index = resources.physical_device.graphics_queue_index,
+        }, vk_alloc);
+        return .{
+            .alloc = vk_alloc,
+            .instance = resources.instance,
+            .physical_device = resources.physical_device,
+            .device = resources.device,
+            .graphics_queue = vk.QueueProxy.init(resources.graphics_queue, resources.device.wrapper),
+            .present_queue = vk.QueueProxy.init(resources.present_queue, resources.device.wrapper),
+            .cmd_pool = cmd_pool,
+            .low_loader = low_loader,
+            .low_instance = low_instance,
+            .low_device = low_device,
+            .owns_device = false,
+            .owns_instance = false,
+        };
     }
 };
 
+/// Shared Vulkan resources used by all low-backed windows.
 pub const VkBackend = struct {
     gpa: std.mem.Allocator,
     vk_alloc: ?*vk.AllocationCallbacks = null,
@@ -197,347 +269,24 @@ pub const WindowContext = struct {
     dvui_window: dvui.Window,
     dvui_interrupted: bool = true, // interrupt dvui sleep if its used
     received_close: bool = false,
-    /// requests swapchain recreate with then latest_pixel_size. executed & flag reset on next image is acquire
-    recreate_swapchain_requested: bool = false,
 
     last_pixel_size: dvui.Size.Physical = .{ .w = 800, .h = 600 },
     last_window_size: dvui.Size.Natural = .{ .w = 800, .h = 600 },
     last_cursor_x: f64 = 0,
     last_cursor_y: f64 = 0,
 
-    surface: vk.SurfaceKHR = vk.SurfaceKHR.null_handle,
-    swapchain_state: ?SwapchainState = null,
+    render_context: Targets.RenderContext = undefined,
+    render_target: ?Targets.RenderTarget = null,
 
     arena: std.mem.Allocator = undefined,
 
     hwnd: if (builtin.os.tag != .windows) void else *anyopaque, // win32.HWND
     low_window: ?*anyopaque = null,
-
-    pub const SwapchainState = struct {
-        pub const max_images = 4;
-        swapchain: vkk.Swapchain,
-        images: []vk.Image,
-        image_views: []vk.ImageView,
-        framebuffers: []vk.Framebuffer = &.{},
-        /// A presentation operation can outlive the graphics submission that
-        /// signals its semaphore.  Therefore these are indexed by acquired
-        /// swapchain image, not by CPU frame-in-flight.
-        render_finished: []vk.Semaphore,
-        // options for recreate, cached from init or modified before manually recreating swapchain
-        options: Options,
-        current_layout: [max_images]vk.ImageLayout = [_]vk.ImageLayout{.undefined} ** max_images, // used only with dynamic_rendering
-
-        const Options = struct {
-            desired_formats: []const vk.SurfaceFormatKHR = &.{},
-            desired_present_modes: []vk.PresentModeKHR = &.{},
-            msaa: vk.SampleCountFlags = .{ .@"1_bit" = true },
-            dynamic_rendering: bool = false, // should not be changed after init
-        };
-
-        pub fn init(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
-            const gpa = ctx.backend.gpa;
-            const vkc = ctx.backend.vkc;
-            const swapchain = try vkk.Swapchain.create(
-                gpa,
-                vkc.instance,
-                vkc.device,
-                vkc.physical_device.handle,
-                ctx.surface,
-                options,
-                null,
-            );
-            errdefer vkc.device.destroySwapchainKHR(swapchain.handle, vkc.alloc);
-            slog.debug("created swapchain: {}X {}x{} {}", .{ swapchain.image_count, swapchain.extent.width, swapchain.extent.height, swapchain.image_format });
-            if (max_images < swapchain.image_count) unreachable;
-
-            const images: []vk.Image = try gpa.alloc(vk.Image, swapchain.image_count);
-            errdefer gpa.free(images);
-            try swapchain.getImages(images);
-            const image_views = try swapchain.getImageViewsAlloc(gpa, images, vkc.alloc);
-            errdefer {
-                for (image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
-                gpa.free(image_views);
-            }
-            const render_finished = try createRenderFinishedSemaphores(gpa, vkc, swapchain.image_count);
-            errdefer destroyRenderFinishedSemaphores(gpa, vkc, render_finished);
-            const desired_formats = try gpa.dupe(vk.SurfaceFormatKHR, options.desired_formats);
-            errdefer gpa.free(desired_formats);
-            const desired_present_modes = try gpa.dupe(vk.PresentModeKHR, options.desired_present_modes);
-            errdefer gpa.free(desired_present_modes);
-            return .{
-                .swapchain = swapchain,
-                .images = images,
-                .image_views = image_views,
-                .render_finished = render_finished,
-                .options = .{
-                    .desired_formats = desired_formats,
-                    .desired_present_modes = desired_present_modes,
-                },
-            };
-        }
-
-        pub fn initForDynamicRendering(ctx: *WindowContext, options: vkk.Swapchain.CreateSettings) !SwapchainState {
-            var s = try SwapchainState.init(ctx, options);
-            s.options.dynamic_rendering = true;
-            return s;
-        }
-
-        pub fn deinit(self: *@This(), ctx: *WindowContext) void {
-            self.destroySwapchainResources(ctx);
-
-            const gpa = ctx.backend.gpa;
-            gpa.free(self.options.desired_present_modes);
-            gpa.free(self.options.desired_formats);
-        }
-
-        fn destroySwapchainResources(self: *@This(), ctx: *WindowContext) void {
-            const gpa = ctx.backend.gpa;
-            const vkc = ctx.backend.vkc;
-
-            for (self.framebuffers) |framebuffer| vkc.device.destroyFramebuffer(framebuffer, vkc.alloc);
-            gpa.free(self.framebuffers);
-            self.framebuffers = &.{};
-
-            for (self.image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
-            gpa.free(self.image_views);
-            self.image_views = &.{};
-
-            destroyRenderFinishedSemaphores(gpa, vkc, self.render_finished);
-            self.render_finished = &.{};
-
-            gpa.free(self.images);
-            self.images = &.{};
-
-            vkc.device.destroySwapchainKHR(self.swapchain.handle, vkc.alloc);
-        }
-
-        pub fn recreate(self: *@This(), ctx: *WindowContext) !void {
-            const gpa = ctx.backend.gpa;
-            const vkc = ctx.backend.vkc;
-            try vkc.device.deviceWaitIdle();
-            const extent = vk.Extent2D{
-                .width = @max(1, @as(u32, @intFromFloat(ctx.last_pixel_size.w))),
-                .height = @max(1, @as(u32, @intFromFloat(ctx.last_pixel_size.h))),
-            };
-            const old_swapchain = self.swapchain;
-            const new_swapchain = try vkk.Swapchain.create(
-                gpa,
-                vkc.instance,
-                vkc.device,
-                vkc.physical_device.handle,
-                ctx.surface,
-                .{
-                    .graphics_queue_index = vkc.physical_device.graphics_queue_index,
-                    .present_queue_index = vkc.physical_device.present_queue_index orelse vkc.physical_device.graphics_queue_index,
-                    .desired_extent = extent,
-                    .old_swapchain = old_swapchain.handle,
-                    .desired_min_image_count = old_swapchain.image_count,
-                    .desired_formats = self.options.desired_formats,
-                    .desired_present_modes = self.options.desired_present_modes,
-                },
-                null,
-            );
-            errdefer vkc.device.destroySwapchainKHR(new_swapchain.handle, vkc.alloc);
-            if (max_images < new_swapchain.image_count) unreachable;
-            // slog.debug("recreated swapchain: {}X {}x{} {}", .{ new_swapchain.image_count, new_swapchain.extent.width, new_swapchain.extent.height, new_swapchain.image_format });
-            ctx.last_pixel_size.w = @floatFromInt(new_swapchain.extent.width);
-            ctx.last_pixel_size.h = @floatFromInt(new_swapchain.extent.height);
-
-            const new_images = try gpa.alloc(vk.Image, new_swapchain.image_count);
-            errdefer gpa.free(new_images);
-            try new_swapchain.getImages(new_images);
-            const new_image_views = try new_swapchain.getImageViewsAlloc(gpa, new_images, vkc.alloc);
-            errdefer {
-                for (new_image_views) |view| vkc.device.destroyImageView(view, vkc.alloc);
-                gpa.free(new_image_views);
-            }
-            const new_render_finished = try createRenderFinishedSemaphores(gpa, vkc, new_swapchain.image_count);
-            errdefer destroyRenderFinishedSemaphores(gpa, vkc, new_render_finished);
-
-            self.destroySwapchainResources(ctx);
-            self.swapchain = new_swapchain;
-            self.images = new_images;
-            self.image_views = new_image_views;
-            self.render_finished = new_render_finished;
-            self.framebuffers = &.{};
-            self.current_layout = [_]vk.ImageLayout{.undefined} ** max_images;
-        }
-
-        pub fn maybeRecreate(swapchain_state: *@This(), ctx: *WindowContext) !bool {
-            if (ctx.recreate_swapchain_requested) {
-                try swapchain_state.recreate(ctx);
-                ctx.recreate_swapchain_requested = false;
-                return true;
-            }
-            return false;
-        }
-
-        pub fn maybeCreateFramebuffer(
-            swapchain_state: *@This(),
-            gpa: std.mem.Allocator,
-            ctx: *WindowContext,
-            shared_attachments: []const vk.ImageView,
-            render_pass: vk.RenderPass,
-        ) !bool {
-            if (swapchain_state.options.dynamic_rendering) unreachable;
-            const vkc = ctx.backend.vkc;
-            if (swapchain_state.framebuffers.len == 0) {
-                try swapchain_state.createFramebuffers(
-                    gpa,
-                    vkc,
-                    shared_attachments,
-                    render_pass,
-                );
-                return true;
-            }
-            return false;
-        }
-
-        pub fn acquireImageMaybeRecreate(
-            swapchain_state: *@This(),
-            gpa: std.mem.Allocator,
-            ctx: *WindowContext,
-            sync: FrameSync,
-            shared_attachments: []const vk.ImageView, // for framebuffer recreate
-            render_pass: vk.RenderPass, // for framebuffer recreate
-        ) !u32 {
-            const vkc = ctx.backend.vkc;
-            const device = vkc.device;
-            const image_index = blk: while (true) {
-                _ = try swapchain_state.maybeRecreate(ctx);
-                if (!swapchain_state.options.dynamic_rendering) _ = try swapchain_state.maybeCreateFramebuffer(gpa, ctx, shared_attachments, render_pass);
-
-                const next_image_result = device.acquireNextImageKHR(
-                    ctx.swapchain_state.?.swapchain.handle,
-                    std.math.maxInt(u64),
-                    sync.imageAvailableSemaphore(),
-                    .null_handle,
-                ) catch |err| {
-                    if (err == error.OutOfDateKHR) {
-                        ctx.recreate_swapchain_requested = true;
-                        continue;
-                    }
-                    return err;
-                };
-                switch (next_image_result.result) {
-                    .success => {},
-                    .suboptimal_khr => {
-                        ctx.recreate_swapchain_requested = true;
-                        // its stil valid to render, lets try to run with it for 1 frame
-                        // continue;
-                    },
-                    else => |err| std.debug.panic("Failed to acquire next frame: {}", .{err}),
-                }
-                break :blk next_image_result.image_index;
-            };
-            // slog.debug("acq {}", .{image_index});
-            return image_index; // autofix
-        }
-
-        fn createFramebuffers(
-            swapchain_state: *@This(),
-            allocator: std.mem.Allocator,
-            vkc: VkContext,
-            shared_attachments: []const vk.ImageView,
-            render_pass: vk.RenderPass,
-        ) !void {
-            if (swapchain_state.options.dynamic_rendering) unreachable;
-            const device = vkc.device;
-            const vk_alloc = vkc.alloc;
-            for (swapchain_state.framebuffers) |fb| device.destroyFramebuffer(fb, vk_alloc);
-            const extent: vk.Extent2D = swapchain_state.swapchain.extent;
-            const image_count: u32 = swapchain_state.swapchain.image_count;
-            const image_views: []const vk.ImageView = swapchain_state.image_views;
-            var framebuffers = try std.ArrayList(vk.Framebuffer).initCapacity(allocator, image_count);
-            errdefer {
-                for (framebuffers.items) |framebuffer| {
-                    device.destroyFramebuffer(framebuffer, vk_alloc);
-                }
-                framebuffers.deinit(allocator);
-            }
-
-            for (0..image_count) |i| {
-                var attachments = [1]vk.ImageView{.null_handle} ** 8;
-                attachments[0] = image_views[i];
-                std.debug.assert(shared_attachments.len < 7);
-                for (shared_attachments, 1..) |sa, si| attachments[si] = sa;
-                const framebuffer_info = vk.FramebufferCreateInfo{
-                    .render_pass = render_pass,
-                    .attachment_count = @intCast(1 + shared_attachments.len),
-                    .p_attachments = &attachments,
-                    .width = extent.width,
-                    .height = extent.height,
-                    .layers = 1,
-                };
-
-                const framebuffer = try device.createFramebuffer(&framebuffer_info, null);
-                framebuffers.appendAssumeCapacity(framebuffer);
-            }
-
-            swapchain_state.framebuffers = framebuffers.items;
-        }
-
-        fn createRenderFinishedSemaphores(allocator: std.mem.Allocator, vkc: VkContext, count: u32) ![]vk.Semaphore {
-            const semaphores = try allocator.alloc(vk.Semaphore, count);
-            for (semaphores) |*semaphore| semaphore.* = .null_handle;
-            errdefer destroyRenderFinishedSemaphores(allocator, vkc, semaphores);
-
-            const create_info = vk.SemaphoreCreateInfo{};
-            for (semaphores) |*semaphore| {
-                semaphore.* = try vkc.device.createSemaphore(&create_info, vkc.alloc);
-            }
-            return semaphores;
-        }
-
-        fn destroyRenderFinishedSemaphores(allocator: std.mem.Allocator, vkc: VkContext, semaphores: []vk.Semaphore) void {
-            for (semaphores) |semaphore| {
-                if (semaphore != .null_handle) vkc.device.destroySemaphore(semaphore, vkc.alloc);
-            }
-            allocator.free(semaphores);
-        }
-
-        pub fn transitionLayout(self: *@This(), cmd: vk.CommandBufferProxy, image_index: usize, layout: vk.ImageLayout) void {
-            if (!self.options.dynamic_rendering) unreachable;
-            if (layout != .present_src_khr and layout != .color_attachment_optimal) unreachable;
-            const current_layout = self.current_layout[image_index];
-            if (current_layout != layout) {
-                var img_barrier = vk.ImageMemoryBarrier2{
-                    .old_layout = current_layout,
-                    .new_layout = layout,
-                    .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                    .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                    .image = self.images[image_index],
-                    .subresource_range = .{
-                        .aspect_mask = .{ .color_bit = true },
-                        .base_mip_level = 0,
-                        .level_count = 1,
-                        .base_array_layer = 0,
-                        .layer_count = 1,
-                    },
-                };
-                if (current_layout != .undefined) {
-                    if (layout == .color_attachment_optimal) {}
-                    if (layout == .present_src_khr) {
-                        img_barrier.src_access_mask.color_attachment_write_bit = true;
-                        img_barrier.src_stage_mask.color_attachment_output_bit = true;
-                    }
-                }
-                cmd.pipelineBarrier2(&.{ .p_image_memory_barriers = @ptrCast(&img_barrier), .image_memory_barrier_count = 1 });
-                self.current_layout[image_index] = layout;
-            }
-        }
-    };
-
     pub fn deinit(self: *@This()) void {
-        // Presentation may be running on a distinct queue.  Waiting only for
-        // the graphics queue does not make swapchain images or framebuffers
-        // safe to destroy.
+        // Presentation may be running on a distinct queue.
         self.backend.vkc.device.deviceWaitIdle() catch {};
+        if (self.render_target) |*target| target.deinit();
         self.dvui_window.deinit();
-        if (self.swapchain_state) |*s| s.deinit(self);
-        if (self.surface != .null_handle) {
-            self.backend.vkc.instance.destroySurfaceKHR(self.surface, self.backend.vkc.alloc);
-        }
         if (@hasDecl(dvui.backend, "deinitWindow")) {
             dvui.backend.deinitWindow(self);
         }
@@ -592,278 +341,49 @@ pub const WindowContext = struct {
         dvui.progress(@src(), .{ .percent = prc }, .{ .expand = .horizontal });
     }
 };
-
-pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.RenderPass {
-    const color_attachment = vk.AttachmentDescription{
-        .format = image_format,
-        .samples = .{ .@"1_bit" = true },
-        .load_op = .clear,
-        .store_op = .store,
-        .stencil_load_op = .dont_care,
-        .stencil_store_op = .dont_care,
-        .initial_layout = .undefined,
-        .final_layout = .present_src_khr,
-    };
-
-    const color_attachment_refs = [_]vk.AttachmentReference{.{
-        .attachment = 0,
-        .layout = .color_attachment_optimal,
-    }};
-
-    const subpasses = [_]vk.SubpassDescription{.{
-        .pipeline_bind_point = .graphics,
-        .color_attachment_count = color_attachment_refs.len,
-        .p_color_attachments = &color_attachment_refs,
-    }};
-
-    const dependencies = [_]vk.SubpassDependency{.{
-        .src_subpass = vk.SUBPASS_EXTERNAL,
-        .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .src_access_mask = .{},
-        .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true },
-    }};
-
-    const attachments = [_]vk.AttachmentDescription{color_attachment};
-    const renderpass_info = vk.RenderPassCreateInfo{
-        .attachment_count = attachments.len,
-        .p_attachments = &attachments,
-        .subpass_count = subpasses.len,
-        .p_subpasses = &subpasses,
-        .dependency_count = dependencies.len,
-        .p_dependencies = &dependencies,
-    };
-
-    return device.createRenderPass(&renderpass_info, null);
-}
-
-pub fn destroyFramebuffers(allocator: std.mem.Allocator, device: vk.DeviceProxy, framebuffers: []const vk.Framebuffer) void {
-    for (framebuffers) |framebuffer| {
-        device.destroyFramebuffer(framebuffer, null);
-    }
-    allocator.free(framebuffers);
-}
-
-pub const FrameSync = struct {
-    pub const Frame = struct {
-        /// Signaled by vkAcquireNextImageKHR
-        /// GPU waits on this before starting rendering commands
-        /// Ensures the swapchain image is ready for rendering
-        image_available: vk.Semaphore = .null_handle,
-        /// CPU waits for GPU to be able to reuse frame resources
-        in_flight_fence: vk.Fence = .null_handle,
-        allocation_callbacks: ?*vk.AllocationCallbacks = null,
-
-        pub fn init(vkc: VkContext) !Frame {
-            const device = vkc.device;
-            const vk_alloc = vkc.alloc;
-            const semaphore_info = vk.SemaphoreCreateInfo{};
-            const fence_info = vk.FenceCreateInfo{ .flags = .{ .signaled_bit = true } };
-            const image_available = try device.createSemaphore(&semaphore_info, vk_alloc);
-            errdefer device.destroySemaphore(image_available, vk_alloc);
-            const in_flight_fence = try device.createFence(&fence_info, vk_alloc);
-            errdefer device.destroyFence(in_flight_fence, vk_alloc);
-            return .{
-                .image_available = image_available,
-                .in_flight_fence = in_flight_fence,
-                .allocation_callbacks = vk_alloc,
-            };
-        }
-
-        pub fn deinit(it: Frame, device: vk.DeviceProxy) void {
-            if (it.image_available != .null_handle) device.destroySemaphore(it.image_available, it.allocation_callbacks);
-            if (it.in_flight_fence != .null_handle) device.destroyFence(it.in_flight_fence, it.allocation_callbacks);
-        }
-    };
-
-    items: []Frame,
-    current_frame: u8 = 0,
-    frames_done: u56 = 0,
-
-    pub fn init(
-        alloc: std.mem.Allocator,
-        max_frames: u8,
-        vkc: VkContext,
-    ) !@This() {
-        const items = try alloc.alloc(Frame, max_frames);
-        for (items) |*it| it.* = .{};
-        errdefer for (items) |it| it.deinit(vkc.device);
-        for (items) |*it| it.* = try Frame.init(vkc);
-        return .{ .items = items };
-    }
-
-    pub fn deinit(sync: @This(), alloc: std.mem.Allocator, device: vk.DeviceProxy) void {
-        for (sync.items) |it| it.deinit(device);
-        alloc.free(sync.items);
-    }
-
-    pub fn inFlightFence(self: @This()) vk.Fence {
-        return self.items[self.current_frame].in_flight_fence;
-    }
-
-    pub fn imageAvailableSemaphore(self: @This()) vk.Semaphore {
-        return self.items[self.current_frame].image_available;
-    }
-
-    pub fn begin(sync: *@This(), device: vk.DeviceProxy) vk.DeviceProxy.WaitForFencesError!void {
-        sync.current_frame = @intCast(sync.frames_done % sync.items.len);
-        // check/wait for previous frame to finish
-        const result = try device.waitForFences(&.{sync.items[sync.current_frame].in_flight_fence}, .true, std.math.maxInt(u64));
-        std.debug.assert(result == .success); // no timeout is used, so if result is returned should be successes
-    }
-
-    pub fn end(sync: *@This()) void {
-        sync.frames_done += 1;
-    }
-};
-
-pub fn createCommandBuffers(
-    allocator: std.mem.Allocator,
-    device: vk.DeviceProxy,
-    command_pool: vk.CommandPool,
-    count: u32,
-) ![]vk.CommandBuffer {
-    const command_buffers = try allocator.alloc(vk.CommandBuffer, count);
-    errdefer allocator.free(command_buffers);
-
-    const command_buffer_info = vk.CommandBufferAllocateInfo{
-        .command_pool = command_pool,
-        .level = .primary,
-        .command_buffer_count = count,
-    };
-    try device.allocateCommandBuffers(&command_buffer_info, command_buffers.ptr);
-
-    return command_buffers;
-}
-
-pub fn present(
-    ctx: *WindowContext,
-    command_buffer: vk.CommandBuffer,
-    sync: FrameSync.Frame,
-    swapchain: vk.SwapchainKHR,
-    image_index: u32,
-) !bool {
-    // slog.debug("present {}", .{image_index});
-    const vkc = ctx.backend.vkc;
-    const wait_semaphores = [_]vk.Semaphore{sync.image_available};
-    const wait_stages = [_]vk.PipelineStageFlags{.{ .color_attachment_output_bit = true }};
-    const signal_semaphores = [_]vk.Semaphore{ctx.swapchain_state.?.render_finished[image_index]};
-    const command_buffers = [_]vk.CommandBuffer{command_buffer};
-    const submit_info = vk.SubmitInfo{
-        .wait_semaphore_count = wait_semaphores.len,
-        .p_wait_semaphores = &wait_semaphores,
-        .p_wait_dst_stage_mask = &wait_stages,
-        .command_buffer_count = command_buffers.len,
-        .p_command_buffers = &command_buffers,
-        .signal_semaphore_count = signal_semaphores.len,
-        .p_signal_semaphores = &signal_semaphores,
-    };
-
-    const fences = [_]vk.Fence{sync.in_flight_fence};
-    try vkc.device.resetFences(&fences);
-
-    const submits = [_]vk.SubmitInfo{submit_info};
-    try vkc.graphics_queue.submit(&submits, sync.in_flight_fence);
-
-    const indices = [_]u32{image_index};
-    const swapchains = [_]vk.SwapchainKHR{swapchain};
-    const present_info = vk.PresentInfoKHR{
-        .wait_semaphore_count = signal_semaphores.len,
-        .p_wait_semaphores = &signal_semaphores,
-        .swapchain_count = swapchains.len,
-        .p_swapchains = &swapchains,
-        .p_image_indices = &indices,
-    };
-
-    const present_result = vkc.present_queue.presentKHR(&present_info) catch |err| {
-        if (err == error.OutOfDateKHR) {
-            return false;
-        }
-        return err;
-    };
-    switch (present_result) {
-        .success => {},
-        .suboptimal_khr => ctx.recreate_swapchain_requested = true,
-        else => |other| slog.debug("presentKHR result: {}", .{other}),
-    }
-    return true;
-}
-
 pub const AppState = struct {
     backend: *VkBackend,
-    render_pass: vk.RenderPass,
-    sync: FrameSync,
-    command_buffers: []vk.CommandBuffer,
 };
 
 pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
     const b = ctx.backend;
-    const gpa = b.gpa;
-    const render_pass = app_state.render_pass;
     const device = b.vkc.device;
+    _ = app_state;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    // wait for previous frame to finish
-    try app_state.sync.begin(device);
-    defer app_state.sync.end();
-    const image_index = try ctx.swapchain_state.?.acquireImageMaybeRecreate(gpa, ctx, app_state.sync, &.{}, render_pass);
-
-    const command_buffer = app_state.command_buffers[app_state.sync.current_frame];
-    const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
-    try device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
+    var frame = ctx.render_target.?.acquire() catch |err| switch (err) {
+        error.FrameSkipped, error.FrameOutOfDate => return,
+        else => return err,
+    };
+    defer frame.abort();
+    const command_buffer = frame.commandBuffer(vk.CommandBuffer);
     const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
-
-    const clear_values = [_]vk.ClearValue{
-        .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
-    };
-    const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
-    const render_pass_begin_info = vk.RenderPassBeginInfo{
-        .render_pass = render_pass,
-        .framebuffer = framebuffer,
-        .render_area = .{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        },
-        .clear_value_count = clear_values.len,
-        .p_clear_values = &clear_values,
-    };
-
-    cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
-
-    b.renderer.?.beginFrame(cmd.handle, extent);
-    // defer _ = b.renderer.?.endFrame();
-
-    // beginWait coordinates with waitTime below to run frames only when needed
+    const extent: vk.Extent2D = .{ .width = frame.extent.width, .height = frame.extent.height };
+    cmd.beginRendering(&.{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .view_mask = 0,
+        .layer_count = 1,
+        .color_attachment_count = 1,
+        .p_color_attachments = &[_]vk.RenderingAttachmentInfo{.{
+            .image_view = frame.imageView(vk.ImageView),
+            .image_layout = .color_attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_view = .null_handle,
+            .resolve_image_layout = .undefined,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
+        }},
+    });
+    b.renderer.?.beginFrame(command_buffer, extent);
     const nstime = ctx.dvui_window.beginWait(ctx.dvui_interrupted);
-    // marks the beginning of a frame for dvui, can call dvui functions after thisz
     try ctx.dvui_window.begin(nstime);
     const res = try app.frameFn();
-    // marks end of dvui frame, don't call dvui functions after this
-    // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
     const end_micros = try ctx.dvui_window.end(.{});
-
     if (res != .ok) ctx.received_close = true;
-
-    // cursor management
-    // TODO: reenable
-    // b.setCursor(win.cursorRequested());
-
-    cmd.endRenderPass();
-    cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
-
-    if (!try present(
-        ctx,
-        app_state.command_buffers[app_state.sync.current_frame],
-        app_state.sync.items[app_state.sync.current_frame],
-        ctx.swapchain_state.?.swapchain.handle,
-        image_index,
-    )) {
-        // should_recreate_swapchain = true;
-    }
-
-    // sleep when nothing to do
+    cmd.endRendering();
+    try frame.submitAndPresent(.{});
     if (@hasDecl(dvui.backend, "waitEventTimeout")) {
         const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
         ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);

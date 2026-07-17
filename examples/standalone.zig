@@ -4,17 +4,11 @@ const dvui = @import("dvui");
 const vk = @import("vulkan");
 
 const DvuiVkBackend = dvui.backend;
-const win32 = if (builtin.target.os.tag == .windows) DvuiVkBackend.win32 else void;
 const win = if (@hasDecl(DvuiVkBackend, "win")) DvuiVkBackend.win else void;
 const vk_dll = DvuiVkBackend.vk_dll;
-const slog = std.log.scoped(.main);
-const FrameSync = DvuiVkBackend.FrameSync;
 
 pub const AppState = struct {
     backend: *DvuiVkBackend.VkBackend,
-    render_pass: vk.RenderPass,
-    sync: FrameSync,
-    command_buffers: []vk.CommandBuffer,
 
     pub fn init(gpa: std.mem.Allocator) !AppState {
         vk_dll.init() catch |err| std.debug.panic("Failed to init Vulkan: {}", .{err});
@@ -32,14 +26,7 @@ pub const AppState = struct {
         const b = iw.backend;
         const window_context = iw.window;
 
-        const render_pass = try DvuiVkBackend.createRenderPass(b.vkc.device, window_context.swapchain_state.?.swapchain.image_format);
-        errdefer b.vkc.device.destroyRenderPass(render_pass, b.vkc.alloc);
-
-        const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
-        errdefer sync.deinit(gpa, b.vkc.device);
-
-        const command_buffers = try DvuiVkBackend.createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
-        errdefer gpa.free(command_buffers);
+        const color_format: vk.Format = @enumFromInt(window_context.render_target.?.colorFormat());
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,
@@ -47,25 +34,23 @@ pub const AppState = struct {
             .queue = b.vkc.graphics_queue.handle,
             .pdev = b.vkc.physical_device.handle,
             .memory = DvuiVkBackend.VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-            .render_pass = .{ .static = render_pass },
+            .render_pass = .{ .dynamic = .{
+                .view_mask = 0,
+                .color_attachment_count = 1,
+                .p_color_attachment_formats = &.{color_format},
+                .depth_attachment_format = .undefined,
+                .stencil_attachment_format = .undefined,
+            } },
             .max_frames_in_flight = max_frames_in_flight,
         });
 
-        return .{
-            .backend = b,
-            .command_buffers = command_buffers,
-            .render_pass = render_pass,
-            .sync = sync,
-        };
+        return .{ .backend = b };
     }
 
     pub fn deinit(self: AppState, gpa: std.mem.Allocator) void {
         defer vk_dll.deinit();
         defer gpa.destroy(self.backend);
         defer self.backend.deinit();
-        defer self.backend.vkc.device.destroyRenderPass(self.render_pass, self.backend.vkc.alloc);
-        defer self.sync.deinit(gpa, self.backend.vkc.device);
-        defer gpa.free(self.command_buffers);
     }
 };
 pub var g_app_state: AppState = undefined;
@@ -95,12 +80,7 @@ pub fn main() !void {
                     try paint(&g_app_state, ctx);
                     g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
                     if (ctx.received_close) {
-                        if (builtin.target.os.tag == .windows) {
-                            // Let the Win32 window procedure perform final context cleanup.
-                            _ = win32.PostMessageA(@ptrCast(ctx.hwnd), win32.WM_CLOSE, 0, 0);
-                        } else {
-                            g_app_state.backend.destroyContext(ctx);
-                        }
+                        g_app_state.backend.destroyContext(ctx);
                         continue;
                     }
                     i += 1;
@@ -130,38 +110,35 @@ pub fn drawGUI(ctx: *DvuiVkBackend.WindowContext) void {
 
 pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     const b = ctx.backend;
-    const gpa = b.gpa;
-    const render_pass = app_state.render_pass;
-    const sync = &app_state.sync;
     const device = b.vkc.device;
+    _ = app_state;
 
     if (ctx.last_pixel_size.w < 1 or ctx.last_pixel_size.h < 1) return;
 
-    try sync.begin(device);
-    defer sync.end();
-    const image_index = try ctx.swapchain_state.?.acquireImageMaybeRecreate(gpa, ctx, sync.*, &.{}, render_pass);
-
-    const command_buffer = app_state.command_buffers[sync.current_frame];
-    const framebuffer = ctx.swapchain_state.?.framebuffers[image_index];
-    try b.vkc.device.beginCommandBuffer(command_buffer, &.{ .flags = .{} });
-    const cmd = vk.CommandBufferProxy.init(command_buffer, b.vkc.device.wrapper);
-
-    const clear_values = [_]vk.ClearValue{
-        .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
+    var frame = ctx.render_target.?.acquire() catch |err| switch (err) {
+        error.FrameSkipped, error.FrameOutOfDate => return,
+        else => return err,
     };
-    const extent = vk.Extent2D{ .width = @intFromFloat(ctx.last_pixel_size.w), .height = @intFromFloat(ctx.last_pixel_size.h) };
-    const render_pass_begin_info = vk.RenderPassBeginInfo{
-        .render_pass = render_pass,
-        .framebuffer = framebuffer,
-        .render_area = .{
-            .offset = .{ .x = 0, .y = 0 },
-            .extent = extent,
-        },
-        .clear_value_count = clear_values.len,
-        .p_clear_values = &clear_values,
-    };
-
-    cmd.beginRenderPass(&render_pass_begin_info, .@"inline");
+    defer frame.abort();
+    const command_buffer = frame.commandBuffer(vk.CommandBuffer);
+    const cmd = vk.CommandBufferProxy.init(command_buffer, device.wrapper);
+    const extent: vk.Extent2D = .{ .width = frame.extent.width, .height = frame.extent.height };
+    cmd.beginRendering(&.{
+        .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
+        .view_mask = 0,
+        .layer_count = 1,
+        .color_attachment_count = 1,
+        .p_color_attachments = &.{.{
+            .image_view = frame.imageView(vk.ImageView),
+            .image_layout = .color_attachment_optimal,
+            .resolve_mode = .{},
+            .resolve_image_view = .null_handle,
+            .resolve_image_layout = .undefined,
+            .load_op = .clear,
+            .store_op = .store,
+            .clear_value = .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
+        }},
+    });
 
     b.renderer.?.beginFrame(cmd.handle, extent);
     // defer _ = b.renderer.?.endFrame();
@@ -182,16 +159,6 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     // TODO: reenable
     // b.setCursor(win.cursorRequested());
 
-    cmd.endRenderPass();
-    cmd.endCommandBuffer() catch |err| std.debug.panic("Failed to end vulkan cmd buffer: {}", .{err});
-
-    if (!try DvuiVkBackend.present(
-        ctx,
-        command_buffer,
-        sync.items[sync.current_frame],
-        ctx.swapchain_state.?.swapchain.handle,
-        image_index,
-    )) {
-        // should_recreate_swapchain = true;
-    }
+    cmd.endRendering();
+    try frame.submitAndPresent(.{});
 }

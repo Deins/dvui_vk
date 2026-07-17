@@ -15,11 +15,6 @@
             .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
             .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
         },
-        .vk_kickstart = .{
-            .url = "git+https://github.com/mikastiv/vk-kickstart/#97766e8d2073399f06c882954323e5e85f35baaf",
-            .hash = "vk_kickstart-0.1.0-YDdE9ChKAQDOe_GDNH3-1WKNy7TtSeksA0OTCTv419Cy",
-            .lazy = true,
-        },
         // required for windows
         .win32 = .{
             .url = "git+https://github.com/kristoff-it/zigwin32.git?ref=fix/zig16#1102e9b82e8bd50913b6a78035bfb399ebd8cf97",
@@ -27,9 +22,8 @@
             .lazy = true,
         },
         .low = .{
-            // .path = "../low",
-            .url = "git+https://github.com/Deins/low#d1c306114f3170e2538eac66f8414c78e7118497",
-            .hash = "low-0.1.0-d-W1KccuDgCPZfT1Qhtjra0wqYQDfuHANKfEF9VZSrYH",
+            .url = "git+https://github.com/Deins/low#ebe6cd8177cf73aa85e5c3c19a6fe59c00973df6",
+            .hash = "low-0.1.0-d-W1KYRVDwDNNQ4oT029Cwr2smzklr_i_rZDKefN_Ghj",
         },
 
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args

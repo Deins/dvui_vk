@@ -45,25 +45,15 @@ pub fn build(b: *Build) !void {
         .registry = vk_registry,
     });
     const vkzig_bindings = vkzig_dep.module("vulkan-zig");
-    // Add vk-kickstart
-    const kickstart_dep = b.lazyDependency("vk_kickstart", .{
-        .registry = vk_registry,
-        .verbose = false,
-        .target = target,
-        .optimize = optimize,
-    });
-    const kickstart_mod = if (kickstart_dep) |d| d.module("vk-kickstart") else null;
-    if (kickstart_mod) |m| m.import_table.put(b.allocator, "vulkan", vkzig_bindings) catch @panic("OOM"); // replace with same version
-
-    const low_on = target.result.os.tag != .windows;
     const low_x11 = b.option(bool, "low_x11", "Enable X11 in the low backend") orelse (target.result.os.tag == .linux);
     const low_wayland = b.option(bool, "low_wayland", "Enable Wayland in the low backend") orelse (target.result.os.tag == .linux);
-    const low = if (low_on) b.lazyDependency("low", .{
+    const low = b.dependency("low", .{
         .target = target,
         .optimize = optimize,
         .x11 = low_x11,
         .wayland = low_wayland,
-    }) else null;
+        .vk_extras = true,
+    });
 
     // ZTracy
     const ztracy =
@@ -100,11 +90,10 @@ pub fn build(b: *Build) !void {
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = if (low_on) b.path("src/dvui_vk_low.zig") else b.path("src/dvui_vk_win32.zig"),
+        .root_source_file = b.path("src/dvui_vk_low.zig"),
     });
-    if (low) |l| dvui_vk_backend.addImport("low", l.module("low"));
+    dvui_vk_backend.addImport("low", low.module("low"));
     dvui_vk_backend.addImport("vk", vkzig_bindings);
-    if (kickstart_mod) |m| dvui_vk_backend.addImport("vk_kickstart", m);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
     if (target.result.os.tag == .windows) {
         // const dvui_win = b.createModule(.{ .target = target, .optimize = optimize, .root_source_file = dvui_dep.path("src/backends/dx11.zig") });

@@ -5,6 +5,7 @@ pub const low = @import("low");
 pub const win32 = if (builtin.target.os.tag == .windows) @import("win32").everything else void;
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_low);
+const Targets = low.vulkan.targets();
 comptime {
     _ = @import("dvui_c.zig");
 }
@@ -26,15 +27,18 @@ pub const InitOptions = struct {
 
     vsync: bool,
     vk_alloc: ?*vk.AllocationCallbacks = null,
+    /// Borrow a Vulkan instance/device/queues created by the host. The host
+    /// must enable presentation support for the selected low window backend
+    /// and keep these resources alive until the backend is deinitialized.
+    external_device: ?ExternalDevice = null,
 
     max_frames_in_flight: u8 = 2,
-    desired_surface_formats: []const vk.SurfaceFormatKHR = &.{
-        // NOTE: all dvui examples as far as I can tell expect all color transformations to happen directly in srgb space, so we request unorm not srgb format. To support linear rendering this will be an issue.
-        // TODO: add support for both linear and srgb render targets
-        // similar issue: https://github.com/ocornut/imgui/issues/578
-        .{ .format = .a2b10g10r10_unorm_pack32, .color_space = .srgb_nonlinear_khr },
-        .{ .format = .b8g8r8a8_unorm, .color_space = .srgb_nonlinear_khr },
-        .{ .format = .r8g8b8a8_unorm, .color_space = .srgb_nonlinear_khr },
+
+    /// Render-target formats in preference order.
+    color_formats: []const vk.Format = &.{
+        .a2b10g10r10_unorm_pack32,
+        .a2r10g10b10_unorm_pack32,
+        .b8g8r8a8_unorm,
     },
 
     backend: low.BackendRequest = .auto,
@@ -60,15 +64,10 @@ pub const dvui_vk_common = @import("dvui_vk_common.zig");
 pub const DecorationMode = low.DecorationMode;
 pub const WindowState = low.WindowState;
 pub const VkContext = dvui_vk_common.VkContext;
+pub const ExternalDevice = VkContext.ExternalDevice;
 pub const VkBackend = dvui_vk_common.VkBackend;
 pub const WindowContext = dvui_vk_common.WindowContext;
-pub const createRenderPass = dvui_vk_common.createRenderPass;
-pub const createFramebuffers = dvui_vk_common.createFramebuffers;
-pub const destroyFramebuffers = dvui_vk_common.destroyFramebuffers;
-pub const FrameSync = dvui_vk_common.FrameSync;
-pub const createCommandBuffers = dvui_vk_common.createCommandBuffers;
 pub const createInstance = dvui_vk_common.VkContext.createInstance;
-pub const present = dvui_vk_common.present;
 pub const AppState = dvui_vk_common.AppState;
 pub var g_app_state: AppState = undefined;
 pub const paint = dvui_vk_common.paint;
@@ -92,7 +91,6 @@ pub const win = struct {
 pub const GenericError = dvui.Backend.GenericError;
 pub const TextureError = dvui.Backend.TextureError;
 pub const vk_dll = @import("vk_dll.zig");
-pub const vkk = @import("vk_kickstart");
 
 var g_low_context: ?low.Context = null;
 var g_low_context_refs: usize = 0;
@@ -179,48 +177,35 @@ fn lowWindowSizeFromDvui(size: dvui.Size) low.Size {
     };
 }
 
-pub fn createVkSurfaceLow(self: *WindowContext, vk_instance: vk.InstanceProxy) bool {
-    const low_win = lowWindow(self);
-    if (builtin.target.os.tag == .windows) {
-        const ci = vk.Win32SurfaceCreateInfoKHR{
-            .hinstance = @ptrCast(low_win.nativeDisplay()),
-            .hwnd = @ptrFromInt(low_win.nativeSurface()),
-        };
-        self.surface = vk_instance.createWin32SurfaceKHR(&ci, self.backend.vk_alloc) catch |err| {
-            slog.err("Failed to create surface: {}", .{err});
-            return false;
-        };
-        return true;
+fn initRenderTarget(ctx: *WindowContext, window: *low.Window, options: InitOptions) !void {
+    const vkc = ctx.backend.vkc;
+    const color_formats = try options.gpa.alloc(low.vulkan.api.Format, options.color_formats.len);
+    defer options.gpa.free(color_formats);
+    for (options.color_formats, color_formats) |source, *destination| {
+        destination.* = low.vulkan.toFormat(source);
     }
-    return switch (low_win.ctx.backendKind()) {
-        .wayland => blk: {
-            const ci = vk.WaylandSurfaceCreateInfoKHR{
-                .display = @ptrCast(@alignCast(low_win.nativeDisplay())),
-                .surface = @ptrFromInt(low_win.nativeSurface()),
-            };
-            self.surface = vk_instance.createWaylandSurfaceKHR(&ci, self.backend.vk_alloc) catch |err| {
-                slog.err("Failed to create surface: {}", .{err});
-                return false;
-            };
-            break :blk true;
-        },
-        .x11 => blk: {
-            const ci = vk.XlibSurfaceCreateInfoKHR{
-                .dpy = @ptrCast(@alignCast(low_win.nativeDisplay())),
-                .window = @as(vk.Window, @intCast(low_win.nativeSurface())),
-            };
-            self.surface = vk_instance.createXlibSurfaceKHR(&ci, null) catch |err| {
-                slog.err("Failed to create surface: {}", .{err});
-                return false;
-            };
-            break :blk true;
-        },
-        // Neither backend exposes an OS Vulkan surface. Windows is handled
-        // above, while offscreen rendering intentionally has no surface.
-        .offscreen, .windows => false,
-    };
+    ctx.render_context = Targets.RenderContext.init(
+        vkc.low_instance,
+        low.vulkan.toPhysicalDevice(vkc.physical_device.handle),
+        vkc.low_device,
+        low.vulkan.toQueue(vkc.graphics_queue.handle),
+        vkc.physical_device.graphics_queue_index,
+        @intCast(@intFromEnum(vkc.cmd_pool)),
+    );
+    if (vkc.physical_device.present_queue_index) |family| {
+        ctx.render_context.present_queue = .{
+            .queue = low.vulkan.toQueue(vkc.present_queue.handle),
+            .family = family,
+        };
+    }
+    ctx.render_target = try Targets.RenderTarget.init(ctx.backend.gpa, .{
+        .window = window,
+        .context = &ctx.render_context,
+        .color_formats = color_formats,
+        .vsync = if (options.vsync) .on else .off,
+        .frames_in_flight = options.max_frames_in_flight,
+    });
 }
-pub const createVkSurface = createVkSurfaceLow;
 
 //
 //   Dvui backend implementation
@@ -561,7 +546,6 @@ fn syncWindowState(ctx: *WindowContext) void {
     const pixel_size = lowSizeToPhysical(window.getFramebufferSize());
     if (pixel_size.w != ctx.last_pixel_size.w or pixel_size.h != ctx.last_pixel_size.h) {
         ctx.last_pixel_size = pixel_size;
-        ctx.recreate_swapchain_requested = true;
     }
 
     ctx.dvui_window.content_scale = window.getContentScale().x;
@@ -596,7 +580,7 @@ fn unregisterWindowContext(ctx: *WindowContext) void {
     _ = g_low_window_contexts.swapRemove(index);
 }
 
-pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !InitWindowResult {
+pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !InitWindowResult {
     const gpa = init_opts.dvui_gpa;
 
     const b = try gpa.create(VkBackend);
@@ -660,32 +644,24 @@ pub fn initWindow(loader: vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !In
     try registerWindowContext(window_context, gpa);
 
     var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{ .extended_dynamic_state = .true };
-    b.vkc = try VkContext.init(gpa, loader, window_context, &createVkSurfaceLow, .{
-        .vk_alloc = init_opts.vk_alloc,
-        .device_select_settings = .{
-            .required_extensions = &.{
+    if (init_opts.external_device) |resources| {
+        b.vkc = try VkContext.initExternal(resources, init_opts.vk_alloc);
+    } else {
+        b.vkc = try VkContext.init(gpa, loader orelse return error.VulkanLoaderRequired, low_ctx.vulkanPresentationSupport(), .{
+            .vk_alloc = init_opts.vk_alloc,
+            .instance_extensions = low_ctx.requiredVulkanInstanceExtensions(),
+            .device_extensions = &.{
                 vk.extensions.khr_swapchain.name,
                 vk.extensions.ext_extended_dynamic_state.name,
             },
-            .required_features_13 = .{
-                .synchronization_2 = .true,
-                .dynamic_rendering = .true,
-            },
-        },
-        .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
-    });
+            .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
+        });
+    }
     backend_containers_need_cleanup = false;
     manual_cleanup = false;
     errdefer b.deinit();
 
-    window_context.swapchain_state = try WindowContext.SwapchainState.init(window_context, .{
-        .graphics_queue_index = b.vkc.physical_device.graphics_queue_index,
-        .present_queue_index = if (b.vkc.physical_device.present_queue_index) |q| q else b.vkc.physical_device.graphics_queue_index,
-        .desired_extent = vk.Extent2D{ .width = @intFromFloat(window_context.last_pixel_size.w), .height = @intFromFloat(window_context.last_pixel_size.h) },
-        .desired_min_image_count = init_opts.max_frames_in_flight,
-        .desired_formats = init_opts.desired_surface_formats,
-        .desired_present_modes = if (!init_opts.vsync) &.{ .immediate_khr, .mailbox_khr } else &.{ .fifo_khr, .mailbox_khr },
-    });
+    try initRenderTarget(window_context, created_window, init_opts);
     return .{ .backend = b, .window = window_context };
 }
 
@@ -714,20 +690,11 @@ pub fn main() !void {
     defer iw.deinit();
     const b = iw.backend;
 
-    const render_pass = try createRenderPass(b.vkc.device, iw.window.swapchain_state.?.swapchain.image_format);
-    defer b.vkc.device.destroyRenderPass(render_pass, b.vkc.alloc);
-
-    const sync = try FrameSync.init(gpa, max_frames_in_flight, b.vkc);
-    defer sync.deinit(gpa, b.vkc.device);
-
-    const command_buffers = try createCommandBuffers(gpa, b.vkc.device, b.vkc.cmd_pool, max_frames_in_flight);
-    defer gpa.free(command_buffers);
+    const color_format: vk.Format = @enumFromInt(iw.window.render_target.?.colorFormat());
+    var color_formats = [_]vk.Format{color_format};
 
     g_app_state = .{
         .backend = b,
-        .command_buffers = command_buffers,
-        .render_pass = render_pass,
-        .sync = sync,
     };
 
     if (app.initFn) |initFn| {
@@ -741,7 +708,13 @@ pub fn main() !void {
         .queue = b.vkc.graphics_queue.handle,
         .pdev = b.vkc.physical_device.handle,
         .memory = VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-        .render_pass = .{ .static = render_pass },
+        .render_pass = .{ .dynamic = .{
+            .view_mask = 0,
+            .color_attachment_count = color_formats.len,
+            .p_color_attachment_formats = &color_formats,
+            .depth_attachment_format = .undefined,
+            .stencil_attachment_format = .undefined,
+        } },
         .max_frames_in_flight = max_frames_in_flight,
     });
 
