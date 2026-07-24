@@ -2,19 +2,20 @@
 [![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.2` an newer and `zig v0.16` (see tags for older)
+Targeting `vulkan 1.2` and newer, and `zig v0.16` (see tags for older)
 
 ![screenshot](examples/3d/screenshot.png)
 
 ### Current platform support
 
-* **Windows** native
-Standalone example not implemented at the moment. 
+* **Windows** and **Linux** native
     * **Windows** native Win32
+    * **Linux** native via `low` (X11/Wayland on Linux)
 
 Backend is separated in parts:
 * [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc. Only dependency: [vulkan_zig](https://github.com/Snektron/vulkan-zig)
 * DVUI backend implementations, has additional dependencies (see build.zig.zon):
+    * [dvui_vk_low.zig](./src/dvui_vk_low.zig) - backend powered by `low` for cross-platform Vulkan windowing and input.
     * [dvui_vk_win32.zig](./src/dvui_vk_win32.zig) - backend based on native win32 api for windowing and input. (Windows only)
     * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - additional common stuff used by all backends.
 
@@ -28,7 +29,6 @@ Backend is separated in parts:
     * Touch events
     * for windows native backend:
         * Sleep when inactive is not implemented.
-        * Some misc platform functions such as openURL, clipboard etc.
 
 ## Build & Run
 ```sh
@@ -43,7 +43,7 @@ Shaders when modified need be recompiled by adding `-Dslangc` to build command. 
 Or alternatively `cd examples/3d` and `zig build run`
 
 ### Standalone example
-Similarly as others only `run` instead of `run-app`. Windows native only.
+Similarly as others, use `run` instead of `run-app`.
 
 ### Cross compilation
 
