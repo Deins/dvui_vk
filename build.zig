@@ -130,7 +130,10 @@ pub fn build(b: *Build) !void {
         exe.root_module.addImport("dvui", dvui_module);
         exe.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
-            exe.win32_manifest = dvui_dep.path("./src/main.manifest");
+            // wio embeds its own, more complete application manifest via
+            // win32.rc. Linking DVUI's manifest as well creates duplicate
+            // RT_MANIFEST resource ID 1.
+            if (window_backend == .low) exe.win32_manifest = dvui_dep.path("./src/main.manifest");
             exe.subsystem = .Windows;
         }
         b.installArtifact(exe);
