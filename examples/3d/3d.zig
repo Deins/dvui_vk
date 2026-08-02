@@ -122,7 +122,8 @@ pub const AppState = struct {
 
         const loader = if (uses_vk_dll) vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}") else DvuiVkBackend.getInstanceProcAddress;
 
-        const init_window = try DvuiVkBackend.initWindow(loader, .{
+        const init_window = try DvuiVkBackend.initWindow(.{
+            .vulkan = .{ .create = loader },
             .dvui_gpa = gpa,
             .gpa = gpa,
             .title = "3d example",
@@ -145,19 +146,21 @@ pub const AppState = struct {
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,
-            .comamnd_pool = b.vkc.cmd_pool,
-            .queue = b.vkc.graphics_queue.handle,
-            .pdev = b.vkc.physical_device.handle,
-            .memory = DvuiVkBackend.VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
+            .graphics_queue_family_index = b.vkc.physical_device.graphics_queue_index,
+            .submit_prepass = .{ .userdata = b, .submit = DvuiVkBackend.VkBackend.submitRendererPrepass },
+            .gpu_allocator = .{ .builtin = DvuiVkBackend.VkRenderer.VkMemory.init(
+                b.vkc.physical_device.memory_properties,
+                b.vkc.physical_device.properties.limits.non_coherent_atom_size,
+            ) orelse @panic("invalid vulkan memory") },
             .render_pass = if (dynamic_rendering) .{
-                .dynamic = vk.PipelineRenderingCreateInfo{
+                .dynamic = .{ .info = vk.PipelineRenderingCreateInfo{
                     .color_attachment_count = 1,
                     .view_mask = 0,
                     .p_color_attachment_formats = &.{color_format},
                     .depth_attachment_format = DepthBuffer.format,
                     .stencil_attachment_format = .undefined,
-                },
-            } else .{ .static = render_pass },
+                } },
+            } else .{ .static = .{ .render_pass = render_pass } },
             .max_frames_in_flight = max_frames_in_flight,
         });
 
@@ -559,8 +562,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
 
     var end_micros: ?u32 = null;
     if (true) { // draw dvui
-        b.renderer.?.beginFrame(cmd.handle, extent);
-        // defer _ = b.renderer.?.endFrame();
+        try b.renderer.?.beginFrame(cmd.handle, extent);
 
         // beginWait coordinates with waitTime below to run frames only when needed
         const nstime = ctx.dvui_window.beginWait(ctx.dvui_interrupted);
@@ -573,6 +575,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         // marks end of dvui frame, don't call dvui functions after this
         // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
         end_micros = try ctx.dvui_window.end(.{});
+        _ = try b.renderer.?.endFrame();
 
         // cursor management
         // TODO: reenable

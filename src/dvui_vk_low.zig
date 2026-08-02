@@ -38,10 +38,9 @@ pub const InitOptions = struct {
 
     vsync: bool,
     vk_alloc: ?*vk.AllocationCallbacks = null,
-    /// Borrow a Vulkan instance/device/queues created by the host. The host
-    /// must enable presentation support for the selected low window backend
-    /// and keep these resources alive until the backend is deinitialized.
-    external_device: ?ExternalDevice = null,
+    /// Either create/own Vulkan resources from the loader, or borrow a complete
+    /// host-provided device bundle.
+    vulkan: VulkanSource,
 
     max_frames_in_flight: u8 = 2,
 
@@ -77,6 +76,12 @@ pub const WindowState = low.WindowState;
 pub const WindowPlacement = enum { default, centered };
 pub const VkContext = dvui_vk_common.VkContext;
 pub const ExternalDevice = VkContext.ExternalDevice;
+pub const VulkanSource = union(enum) {
+    create: vk.PfnGetInstanceProcAddr,
+    /// The host must enable presentation support for the selected low window
+    /// backend and keep these resources alive until backend deinitialization.
+    external: ExternalDevice,
+};
 pub const VkBackend = dvui_vk_common.VkBackend;
 pub const WindowContext = dvui_vk_common.WindowContext;
 pub const createInstance = dvui_vk_common.VkContext.createInstance;
@@ -610,7 +615,7 @@ fn unregisterWindowContext(ctx: *WindowContext) void {
     _ = g_low_window_contexts.swapRemove(index);
 }
 
-pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !InitWindowResult {
+pub fn initWindow(init_opts: InitOptions) !InitWindowResult {
     const gpa = init_opts.dvui_gpa;
 
     const b = try gpa.create(VkBackend);
@@ -681,10 +686,9 @@ pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !I
     try registerWindowContext(window_context, gpa);
 
     var ext_dynamic_state_features = vk.PhysicalDeviceExtendedDynamicStateFeaturesEXT{ .extended_dynamic_state = .true };
-    if (init_opts.external_device) |resources| {
-        b.vkc = try VkContext.initExternal(resources, init_opts.vk_alloc);
-    } else {
-        b.vkc = try VkContext.init(gpa, loader orelse return error.VulkanLoaderRequired, low_ctx.vulkanPresentationSupport(), .{
+    b.vkc = switch (init_opts.vulkan) {
+        .external => |resources| try VkContext.initExternal(resources, init_opts.vk_alloc),
+        .create => |loader| try VkContext.init(gpa, loader, low_ctx.vulkanPresentationSupport(), .{
             .vk_alloc = init_opts.vk_alloc,
             .instance_extensions = low_ctx.requiredVulkanInstanceExtensions(),
             .device_extensions = &.{
@@ -692,8 +696,8 @@ pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !I
                 vk.extensions.ext_extended_dynamic_state.name,
             },
             .device_create_info_p_next = @ptrCast(&ext_dynamic_state_features),
-        });
-    }
+        }),
+    };
     backend_containers_need_cleanup = false;
     manual_cleanup = false;
     errdefer b.deinit();
@@ -715,7 +719,8 @@ pub fn main() !void {
     defer vk_dll.deinit();
     const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr");
 
-    const iw = try initWindow(loader, .{
+    const iw = try initWindow(.{
+        .vulkan = .{ .create = loader },
         .title = init_opts.title,
         .icon = init_opts.icon,
         .size = init_opts.size,
@@ -740,17 +745,19 @@ pub fn main() !void {
 
     b.renderer = try VkRenderer.init(b.gpa, .{
         .dev = b.vkc.device,
-        .comamnd_pool = b.vkc.cmd_pool,
-        .queue = b.vkc.graphics_queue.handle,
-        .pdev = b.vkc.physical_device.handle,
-        .memory = VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-        .render_pass = .{ .dynamic = .{
+        .graphics_queue_family_index = b.vkc.physical_device.graphics_queue_index,
+        .submit_prepass = .{ .userdata = b, .submit = VkBackend.submitRendererPrepass },
+        .gpu_allocator = .{ .builtin = VkRenderer.VkMemory.init(
+            b.vkc.physical_device.memory_properties,
+            b.vkc.physical_device.properties.limits.non_coherent_atom_size,
+        ) orelse @panic("invalid vulkan memory") },
+        .render_pass = .{ .dynamic = .{ .info = .{
             .view_mask = 0,
             .color_attachment_count = color_formats.len,
             .p_color_attachment_formats = &color_formats,
             .depth_attachment_format = .undefined,
             .stencil_attachment_format = .undefined,
-        } },
+        } } },
         .max_frames_in_flight = max_frames_in_flight,
     });
 

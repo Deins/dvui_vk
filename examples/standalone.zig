@@ -16,7 +16,8 @@ pub const AppState = struct {
         const loader = vk_dll.lookup(vk.PfnGetInstanceProcAddr, "vkGetInstanceProcAddr") orelse @panic("Failed to lookup Vulkan VkGetInstanceProcAddr: {}");
 
         // init backend (creates and owns OS window)
-        const iw = try DvuiVkBackend.initWindow(loader, .{
+        const iw = try DvuiVkBackend.initWindow(.{
+            .vulkan = .{ .create = loader },
             .title = "standalone",
             .dvui_gpa = gpa,
             .gpa = gpa,
@@ -30,17 +31,19 @@ pub const AppState = struct {
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,
-            .comamnd_pool = b.vkc.cmd_pool,
-            .queue = b.vkc.graphics_queue.handle,
-            .pdev = b.vkc.physical_device.handle,
-            .memory = DvuiVkBackend.VkRenderer.VkMemory.init(b.vkc.physical_device.memory_properties) orelse @panic("invalid vulkan memory"),
-            .render_pass = .{ .dynamic = .{
+            .graphics_queue_family_index = b.vkc.physical_device.graphics_queue_index,
+            .submit_prepass = .{ .userdata = b, .submit = DvuiVkBackend.VkBackend.submitRendererPrepass },
+            .gpu_allocator = .{ .builtin = DvuiVkBackend.VkRenderer.VkMemory.init(
+                b.vkc.physical_device.memory_properties,
+                b.vkc.physical_device.properties.limits.non_coherent_atom_size,
+            ) orelse @panic("invalid vulkan memory") },
+            .render_pass = .{ .dynamic = .{ .info = .{
                 .view_mask = 0,
                 .color_attachment_count = 1,
                 .p_color_attachment_formats = &.{color_format},
                 .depth_attachment_format = .undefined,
                 .stencil_attachment_format = .undefined,
-            } },
+            } } },
             .max_frames_in_flight = max_frames_in_flight,
         });
 
@@ -140,8 +143,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         }},
     });
 
-    b.renderer.?.beginFrame(cmd.handle, extent);
-    // defer _ = b.renderer.?.endFrame();
+    try b.renderer.?.beginFrame(cmd.handle, extent);
 
     // beginWait coordinates with waitTime below to run frames only when needed
     const nstime = ctx.dvui_window.beginWait(false);
@@ -154,6 +156,7 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
     // marks end of dvui frame, don't call dvui functions after this
     // - sends all dvui stuff to backend for rendering, must be called before renderPresent()
     _ = try ctx.dvui_window.end(.{});
+    _ = try b.renderer.?.endFrame();
 
     // cursor management
     // TODO: reenable

@@ -1,16 +1,30 @@
 //! Experimental Vulkan dvui renderer
-//! * Follows `max_frames_in_flight` convention which needs to be specified during init:
-//!     For resource management/synchronization its expected that no more than fixed number of begin/end frames will be in flight (alive, submitted, not yet finished by gpu).
-//!     It is used to avoid any unnecessary host<->gpu synchronization when just delaying such operation is possible.
-//!     If `max_frames_in_flight` is misconfigured or not enforced by app or user of renderer then data races and undefined behavior will happen. (for example texture might get deleted while its still in use on gpu).
+//! * Follows the `max_frames_in_flight` convention specified during init.
+//!     Before the Nth subsequent `beginFrame`, all GPU work recorded during the
+//!     original call must have completed. Automatic frame rotation assumes prompt,
+//!     FIFO submission to the same graphics queue. The limit is global when a
+//!     renderer is shared by multiple windows.
+//!     Violating this contract can overwrite buffers or destroy textures still in
+//!     use by the GPU.
 //! * Memory: all space for vertex & index buffers is preallocated at start requiring setting appropriate limits in options.
 //!     Requests to render over limit is safe but will lead to draw commands being ignored. Note that these settings are per frame and total memory allocated will depend on max frames in flight.
-//!     Texture bookkeeping is similarly preallocated. But actual image data on gpu are allocated individually at runtime. Currently 1 image = 1 allocation which is ok for large or few images,
-//!     but not great for many smaller images that can eat in max gpu allocation limit. TODO: implement hooks for general purpose allocator
-//! * Queue submissions: renderer expects itself to be given vk.CommandBuffer where it will record all render commands between begin/end calls.
-//!     However to support runtime texture upload direct queue access is also required. Multi-threaded scenarios have not been tested but optional queue lock/release callbacks can be specified if needed.
+//!     Texture bookkeeping is similarly preallocated. The built-in GPU allocator
+//!     uses one allocation per image; applications with many small images can use
+//!     the optional resource-level allocator hooks instead.
+//! * Command buffers: screen draws are recorded into the caller's command buffer.
+//!     Texture uploads and render-target draws are recorded into an optional
+//!     renderer-owned prepass command buffer, which must execute first. The caller
+//!     can either submit it through `SubmitPrepass` or obtain it from `endFrame`.
+//!
+//! Minimal frame integration (without a submission callback):
+//! ```zig
+//! try renderer.beginFrame(main_cmd, extent);
+//! // Run the DVUI frame; its backend calls record into `renderer`.
+//! const recorded = try renderer.endFrame();
+//! // End command-buffer recording, then submit `recorded.prepass` (if present)
+//! // before `recorded.main` on the same ordered graphics queue.
+//! ```
 const std = @import("std");
-const builtin = @import("builtin");
 const slog = std.log.scoped(.dvui_vulkan);
 const dvui = @import("dvui");
 const vk = @import("vk");
@@ -23,40 +37,161 @@ const Self = @This();
 
 pub const DeviceProxy = vk.DeviceProxy;
 pub const Vertex = dvui.Vertex;
-pub const Indice = u16;
+pub const Index = u16;
 pub const invalid_texture: *anyopaque = @ptrFromInt(0xBAD0BAD0); //@ptrFromInt(0xFFFF_FFFF);
 /// following image applications, dvui does math in srgb color space, so interpret all textures as unorm so no gamma correction occurs
 pub const img_format = vk.Format.r8g8b8a8_unorm; // dvui works in srgb color space, so we don't linearize srgb -> linear colorspace
 pub const TextureIdx = u16;
 
+pub const MainTarget = union(enum) {
+    dynamic: struct {
+        /// Borrowed, including its `p_next` chain and format array, for the
+        /// duration of `init` only.
+        info: vk.PipelineRenderingCreateInfo,
+        samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
+    },
+    static: struct {
+        render_pass: vk.RenderPass,
+        subpass: u32 = 0,
+        samples: vk.SampleCountFlags = .{ .@"1_bit" = true },
+    },
+};
+
+pub const PipelineHandles = struct {
+    pipeline: vk.Pipeline,
+    pipeline_layout: vk.PipelineLayout,
+};
+
+pub const PipelineSource = union(enum) {
+    builtin,
+    borrowed: PipelineHandles,
+    transferred: PipelineHandles,
+};
+
+/// Public pieces of the shader/pipeline ABI used by external pipeline sources.
+pub const texture_descriptor_binding = vk.DescriptorSetLayoutBinding{
+    .binding = 1,
+    .descriptor_count = 1,
+    .descriptor_type = .combined_image_sampler,
+    .stage_flags = .{ .fragment_bit = true },
+};
+
+pub const push_constant_range = vk.PushConstantRange{
+    .stage_flags = .{ .vertex_bit = true },
+    .offset = 0,
+    .size = @sizeOf(PushConstants),
+};
+
+pub const premultiplied_alpha_blend = vk.PipelineColorBlendAttachmentState{
+    .blend_enable = .true,
+    .src_color_blend_factor = .one,
+    .dst_color_blend_factor = .one_minus_src_alpha,
+    .color_blend_op = .add,
+    .src_alpha_blend_factor = .one,
+    .dst_alpha_blend_factor = .one_minus_src_alpha,
+    .alpha_blend_op = .add,
+    .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+};
+
+pub const SubmitPrepass = struct {
+    userdata: ?*anyopaque = null,
+    /// Submit `command_buffer` to the graphics queue before the frame's main
+    /// command buffer. Queue synchronization remains owned by the application.
+    submit: *const fn (userdata: ?*anyopaque, command_buffer: vk.CommandBuffer) anyerror!void,
+};
+
+pub const ResourceUsage = enum {
+    streaming,
+    upload,
+    device_local,
+};
+
+pub const MappedBufferMemory = union(enum) {
+    coherent: [*]u8,
+    non_coherent: struct {
+        ptr: [*]u8,
+        /// Must flush the requested allocation-relative range. The callback is
+        /// responsible for `nonCoherentAtomSize` alignment.
+        flush: *const fn (
+            userdata: ?*anyopaque,
+            dev: DeviceProxy,
+            buffer: vk.Buffer,
+            allocation: ?*anyopaque,
+            offset: vk.DeviceSize,
+            size: vk.DeviceSize,
+        ) anyerror!void,
+    },
+
+    pub fn mappedPtr(self: @This()) [*]u8 {
+        return switch (self) {
+            .coherent => |ptr| ptr,
+            .non_coherent => |memory| memory.ptr,
+        };
+    }
+};
+
+pub const BufferAllocation = struct {
+    handle: vk.Buffer,
+    /// Opaque value returned unchanged to the allocator callbacks.
+    allocation: ?*anyopaque = null,
+    /// Renderer buffers are always persistently mapped.
+    mapped: MappedBufferMemory,
+    /// Bound allocation range available from `mapped`, not merely requested size.
+    size: vk.DeviceSize,
+};
+
+pub const ImageAllocation = struct {
+    handle: vk.Image,
+    /// Opaque value returned unchanged to `destroy_image`.
+    allocation: ?*anyopaque = null,
+    /// Used only for renderer statistics; zero is allowed when unavailable.
+    size: vk.DeviceSize = 0,
+};
+
+/// Resource-level hook for integrating VMA or an application's own GPU
+/// allocator. Returned buffers/images must already be bound to memory. Streaming
+/// and upload buffers must remain mapped for their lifetime.
+pub const ResourceAllocator = struct {
+    /// Must remain valid until renderer `deinit` returns.
+    userdata: ?*anyopaque = null,
+    create_buffer: *const fn (?*anyopaque, DeviceProxy, *const vk.BufferCreateInfo, ResourceUsage) anyerror!BufferAllocation,
+    destroy_buffer: *const fn (?*anyopaque, DeviceProxy, BufferAllocation) void,
+    create_image: *const fn (?*anyopaque, DeviceProxy, *const vk.ImageCreateInfo, ResourceUsage) anyerror!ImageAllocation,
+    destroy_image: *const fn (?*anyopaque, DeviceProxy, ImageAllocation) void,
+};
+
+pub const GpuAllocator = union(enum) {
+    builtin: VkMemory,
+    custom: ResourceAllocator,
+};
+
 // debug flags
 const enable_breakpoints = false;
 const texture_tracing = false; // tace leaks and usage
 
-/// initialization options, caller still owns all passed in resources
+/// Initialization options. Callback userdata, borrowed pipeline handles, and the
+/// device must remain valid until `deinit`; the dynamic-rendering pointer chain is
+/// needed only for the duration of `init`.
 pub const InitOptions = struct {
     dev: vk.DeviceProxy,
-    pdev: vk.PhysicalDevice,
-    memory: VkMemory,
+    /// Select exactly one GPU resource allocation strategy.
+    gpu_allocator: GpuAllocator,
     /// render pass from which renderer will be used
     /// or in case of vulkan >= 1.3 specify use dynamic rendering instead
-    render_pass: union(enum) {
-        dynamic: vk.PipelineRenderingCreateInfo,
-        static: vk.RenderPass,
-    },
+    render_pass: MainTarget,
     /// optional vulkan host side allocator
     vk_alloc: ?*vk.AllocationCallbacks = null,
 
-    /// queue - used only for texture upload
-    /// used here only once during initialization, afterwards texture upload queue must be provided with beginFrame()
-    queue: vk.Queue,
-    /// command pool - used only for texture upload
-    comamnd_pool: vk.CommandPool,
+    /// Graphics-capable queue family used by renderer-owned prepass command pools.
+    graphics_queue_family_index: u32,
+    /// Optional convenience submission hook. When null, `endFrame` returns the
+    /// prepass command buffer for the application to submit before the main one.
+    submit_prepass: ?SubmitPrepass = null,
 
     /// How many frames can be in flight in worst case (usually equals swapchain image count)
     max_frames_in_flight: u32,
 
-    /// Maximum number of indices that can be submitted in single frame
+    /// Maximum number of indices that can be submitted in a single frame.
     /// Draw requests above this limit will get discarded
     max_indices_per_frame: u32 = 1024 * 128,
     max_vertices_per_frame: u32 = 1024 * 64,
@@ -70,83 +205,57 @@ pub const InitOptions = struct {
     /// if by any chance renderer runs out of textures or due to other reason fails to create a texture then this color will be used as texture
     error_texture_color: [4]u8 = [4]u8{ 255, 0, 255, 255 }, // default bright pink so its noticeable for debug, can be set to alpha 0 for invisible etc.
 
-    /// if uv coords go out of bounds, how should the sampling behave
+    /// Wrap mode used by the low-level `createAndUploadTexture` helper. Textures
+    /// created through DVUI honor their own `wrap_u` and `wrap_v` options.
     texture_wrap: vk.SamplerAddressMode = .repeat,
 
-    /// optionally override pipeline with custom one
-    /// NOTE: currently renderer takes ownership and will destruct the pipeline on deinit. TODO: should we keep track of it and let user destruct it?
-    pipeline: vk.Pipeline = .null_handle,
-    pipeline_layout: vk.PipelineLayout = .null_handle,
-
-    /// bytes - total host visible memory allocated ahead of time
-    pub inline fn hostVisibleMemSize(s: @This()) u32 {
-        const vtx_space = std.mem.alignForward(u32, s.max_vertices_per_frame * @sizeOf(dvui.Vertex), vk_alignment);
-        const idx_space = std.mem.alignForward(u32, s.max_indices_per_frame * @sizeOf(Indice), vk_alignment);
-        return s.max_frames_in_flight * (vtx_space + idx_space);
-    }
+    /// Built-in pipeline by default. Borrowed/transferred pipelines must implement
+    /// the descriptor, vertex, blend, and push-constant interface exported below.
+    pipeline: PipelineSource = .builtin,
 };
 
 pub const VkMemory = struct {
+    properties: vk.PhysicalDeviceMemoryProperties,
+    non_coherent_atom_size: vk.DeviceSize,
     /// vulkan memory directly read/writeable by host. Usually ram that is streamed on demand by gpu. Very limited amount
     host_vis: u32,
     /// gpu dedicated memory, or if gpu has none same as host_vis
     device_local: u32,
-    /// flag indicating when memory can be modified without flushing it
-    host_coherent: bool,
-
     /// Returns true for integrated GPUs etc. where gpu shares memory with main memory and it basically doesn't have its own  dedicated local mem
     pub inline fn sharedMem(self: @This()) bool {
-        return self.host_vis == self.host_coherent;
+        return self.host_vis == self.device_local;
     }
 
-    pub fn init(mem_props: vk.PhysicalDeviceMemoryProperties) ?VkMemory {
-        var host_coherent: bool = false;
-        const host_vis_mem_type_index: u32 = blk: {
-            // device local, host visible
-            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
-                if (mem_type.property_flags.device_local_bit and mem_type.property_flags.host_visible_bit) {
-                    host_coherent = mem_type.property_flags.host_coherent_bit;
-                    // slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
-                    break :blk @truncate(i);
-                };
-            // not device local
-            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
-                if (mem_type.property_flags.host_visible_bit) {
-                    host_coherent = mem_type.property_flags.host_coherent_bit;
-                    slog.info("chosen host_visible_mem is NOT device local - Are we running on integrated graphics?", .{});
-                    slog.debug("chosen host_visible_mem: {} {}", .{ i, mem_type });
-                    break :blk @truncate(i);
-                };
-            return null;
-        };
-
-        const device_local_mem_idx: u32 = blk: {
-            for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i|
-                if (mem_type.property_flags.device_local_bit and !mem_type.property_flags.host_visible_bit) {
-                    // slog.debug("chosen device local mem: {} {}", .{ i, mem_type });
-                    break :blk @truncate(i);
-                };
-            break :blk host_vis_mem_type_index;
-        };
+    pub fn init(mem_props: vk.PhysicalDeviceMemoryProperties, non_coherent_atom_size: vk.DeviceSize) ?VkMemory {
+        const all_types = std.math.maxInt(u32);
+        const host_vis_mem_type_index = findMemoryTypeIn(mem_props, all_types, .{ .host_visible_bit = true }, .{ .device_local_bit = true, .host_coherent_bit = true }) orelse
+            findMemoryTypeIn(mem_props, all_types, .{ .host_visible_bit = true }, .{ .host_coherent_bit = true }) orelse return null;
+        const device_local_mem_idx = findMemoryTypeIn(mem_props, all_types, .{ .device_local_bit = true }, .{}) orelse host_vis_mem_type_index;
 
         return .{
+            .properties = mem_props,
+            .non_coherent_atom_size = non_coherent_atom_size,
             .host_vis = host_vis_mem_type_index,
             .device_local = device_local_mem_idx,
-            .host_coherent = host_coherent,
         };
     }
-};
 
-/// TODO:
-/// allocation strategy for device (gpu) memory
-// const ImageAllocStrategy = union(enum) {
-//     /// user provides proper allocator
-//     allocator: struct {},
-//     /// most basic implementation, ok for few images created with backend.createTexture
-//     /// WARNING: can consume much of or hit vk.maxMemoryAllocationCount limit too many resources are used, see:
-//     /// https://vulkan.gpuinfo.org/displaydevicelimit.php?name=maxMemoryAllocationCount&platform=all
-//     allocate_each: void,
-// };
+    pub fn findMemoryType(self: VkMemory, type_bits: u32, required: vk.MemoryPropertyFlags, preferred: vk.MemoryPropertyFlags) ?u32 {
+        return findMemoryTypeIn(self.properties, type_bits, required, preferred) orelse
+            findMemoryTypeIn(self.properties, type_bits, required, .{});
+    }
+
+    fn findMemoryTypeIn(mem_props: vk.PhysicalDeviceMemoryProperties, type_bits: u32, required: vk.MemoryPropertyFlags, preferred: vk.MemoryPropertyFlags) ?u32 {
+        for (mem_props.memory_types[0..mem_props.memory_type_count], 0..) |mem_type, i| {
+            const bit = @as(u32, 1) << @intCast(i);
+            if (type_bits & bit == 0) continue;
+            if (!mem_type.property_flags.contains(required)) continue;
+            if (!mem_type.property_flags.contains(preferred)) continue;
+            return @intCast(i);
+        }
+        return null;
+    }
+};
 
 /// just simple debug and informative metrics
 pub const Stats = struct {
@@ -161,40 +270,40 @@ pub const Stats = struct {
 
 // not owned by us:
 dev: DeviceProxy,
-pdev: vk.PhysicalDevice,
 vk_alloc: ?*vk.AllocationCallbacks,
 cmdbuf: vk.CommandBuffer = .null_handle,
+frame_active: bool = false,
 dpool: vk.DescriptorPool,
-queue: vk.Queue = .null_handle,
-queue_lock: ?LockCallbacks = null,
-cpool: vk.CommandPool = .null_handle,
-cpool_lock: ?LockCallbacks = null,
+submit_prepass: ?SubmitPrepass,
 
 // owned by us
-samplers: [2]vk.Sampler,
+allocator: std.mem.Allocator,
+samplers: [10]vk.Sampler,
 frames: []FrameData,
 textures: []Texture,
 destroy_textures_offset: TextureIdx = 0,
 destroy_textures: []TextureIdx,
+pending_uploads: std.ArrayListUnmanaged(PendingUpload) = .empty,
 pipeline: vk.Pipeline,
 pipeline_layout: vk.PipelineLayout,
+owns_pipeline_resources: bool,
 dset_layout: vk.DescriptorSetLayout,
 current_frame: *FrameData, // points somewhere in frames
 
 /// if set render to render texture instead of default cmdbuf
-render_target: ?vk.CommandBuffer = null,
-render_target_tex: vk.Image = .null_handle,
-render_target_pass: vk.RenderPass, // or null when dynamic rendering enabled
+active_render_target: ?ActiveRenderTarget = null,
+offscreen_rendering: OffscreenRendering,
 render_target_pipeline: vk.Pipeline,
 
-dummy_texture: Texture = undefined, // dummy/null white texture
-error_texture: Texture = undefined,
+dummy_texture: Texture = .{}, // dummy/null white texture
+error_texture: Texture = .{},
 
 host_vis_mem_idx: u32,
 host_vis_mem: vk.DeviceMemory,
 host_vis_coherent: bool,
 host_vis_data: []u8, // mapped host_vis_mem
 device_local_mem_idx: u32,
+gpu_allocator: GpuAllocator,
 
 framebuffer_size: vk.Extent2D = .{ .width = 0, .height = 0 },
 vtx_overflow_logged: bool = false,
@@ -202,27 +311,46 @@ idx_overflow_logged: bool = false,
 // just for info / dbg
 stats: Stats = .{},
 
-dynamic: vk.PipelineRenderingCreateInfo,
+const ActiveRenderTarget = struct {
+    command_buffer: vk.CommandBuffer,
+    texture: *Texture,
+    extent: vk.Extent2D,
+};
+
+const OffscreenRendering = union(enum) {
+    dynamic,
+    render_passes: struct {
+        clear: vk.RenderPass,
+        load: vk.RenderPass,
+    },
+};
 
 pub inline fn dynamicRendering(s: Self) bool {
-    return s.render_target_pass == .null_handle;
+    return s.offscreen_rendering == .dynamic;
 }
-
-/// for potentially multi threaded shared resources, lock callbacks can be set that will be called
-const LockCallbacks = struct {
-    lockCB: *const fn (userdata: ?*anyopaque) void = undefined,
-    unlockCB: *const fn (userdata: ?*anyopaque) void = undefined,
-    lock_userdata: ?*anyopaque = null, // user defined data that will be returned in callbacks
-};
 
 const FrameData = struct {
     // buffers to host_vis memory
     vtx_buff: vk.Buffer = .null_handle,
+    vtx_resource: ?BufferAllocation = null,
     vtx_data: []u8 = &.{},
     vtx_offset: u32 = 0,
     idx_buff: vk.Buffer = .null_handle,
+    idx_resource: ?BufferAllocation = null,
     idx_data: []u8 = &.{},
     idx_offset: u32 = 0,
+    vtx_mem_offset: vk.DeviceSize = 0,
+    idx_mem_offset: vk.DeviceSize = 0,
+    vtx_dirty_start: vk.DeviceSize = std.math.maxInt(vk.DeviceSize),
+    vtx_dirty_end: vk.DeviceSize = 0,
+    idx_dirty_start: vk.DeviceSize = std.math.maxInt(vk.DeviceSize),
+    idx_dirty_end: vk.DeviceSize = 0,
+    prepass_pool: vk.CommandPool = .null_handle,
+    prepass_cmd: vk.CommandBuffer = .null_handle,
+    prepass_used: bool = false,
+    prepass_finalized: bool = false,
+    prepass_delivered: bool = false,
+    staging: std.ArrayListUnmanaged(AllocatedBuffer) = .empty,
     /// textures to be destroyed after frames cycle through
     /// offset & len points to backend.destroy_textures[]
     destroy_textures_offset: u16 = 0,
@@ -230,24 +358,46 @@ const FrameData = struct {
 
     fn deinit(f: *@This(), b: *Backend) void {
         f.freeTextures(b);
-        b.dev.destroyBuffer(f.vtx_buff, b.vk_alloc);
-        b.dev.destroyBuffer(f.idx_buff, b.vk_alloc);
+        f.freeStaging(b);
+        f.staging.deinit(b.allocator);
+        b.destroyStreamBuffer(f.vtx_buff, f.vtx_resource);
+        b.destroyStreamBuffer(f.idx_buff, f.idx_resource);
+        b.dev.destroyCommandPool(f.prepass_pool, b.vk_alloc);
     }
 
-    fn reset(f: *@This(), b: *Backend) void {
+    fn reset(f: *@This(), b: *Backend) !void {
+        f.freeStaging(b);
         f.vtx_offset = 0;
         f.idx_offset = 0;
+        f.vtx_dirty_start = std.math.maxInt(vk.DeviceSize);
+        f.vtx_dirty_end = 0;
+        f.idx_dirty_start = std.math.maxInt(vk.DeviceSize);
+        f.idx_dirty_end = 0;
         f.destroy_textures_offset = b.destroy_textures_offset;
         f.destroy_textures_len = 0;
+        f.prepass_used = false;
+        f.prepass_finalized = false;
+        f.prepass_delivered = false;
+        try b.dev.resetCommandPool(f.prepass_pool, .{});
+        try b.dev.beginCommandBuffer(f.prepass_cmd, &.{ .flags = .{ .one_time_submit_bit = true } });
+    }
+
+    fn freeStaging(f: *@This(), b: *Backend) void {
+        for (f.staging.items) |staging| {
+            b.destroyAllocatedBuffer(staging);
+        }
+        f.staging.clearRetainingCapacity();
     }
 
     fn freeTextures(f: *@This(), b: *Backend) void {
         // free textures
-        for (f.destroy_textures_offset..(f.destroy_textures_offset + f.destroy_textures_len)) |i| {
+        const first: usize = f.destroy_textures_offset;
+        const last: usize = first + @as(usize, f.destroy_textures_len);
+        for (first..last) |i| {
             const tidx = b.destroy_textures[i % b.destroy_textures.len]; // wrap around on overflow
             // just for debug and monitoring
             b.stats.textures_alive -= 1;
-            b.stats.textures_mem -= b.dev.getImageMemoryRequirements(b.textures[tidx].img).size;
+            b.stats.textures_mem -= b.textures[tidx].allocation_size;
 
             //slog.debug("destroy texture {}({x}) | {}", .{ tidx, @intFromPtr(&b.textures[tidx]), b.stats.textures_alive });
             b.textures[tidx].deinit(b);
@@ -261,54 +411,167 @@ const FrameData = struct {
     }
 };
 
+fn samplerSlot(interpolation: dvui.enums.TextureInterpolation, wrap_u: dvui.enums.TextureWrap, wrap_v: dvui.enums.TextureWrap) usize {
+    const interpolation_index: usize = switch (interpolation) {
+        .nearest => 0,
+        .linear => 1,
+    };
+    const wrap_u_index: usize = switch (wrap_u) {
+        .clamp => 0,
+        .repeat => 1,
+    };
+    const wrap_v_index: usize = switch (wrap_v) {
+        .clamp => 0,
+        .repeat => 1,
+    };
+    return interpolation_index * 4 + wrap_u_index * 2 + wrap_v_index;
+}
+
+fn samplerCreateInfo(interpolation: dvui.enums.TextureInterpolation, wrap_u: vk.SamplerAddressMode, wrap_v: vk.SamplerAddressMode) vk.SamplerCreateInfo {
+    const filter: vk.Filter = if (interpolation == .nearest) .nearest else .linear;
+    const mipmap_mode: vk.SamplerMipmapMode = if (interpolation == .nearest) .nearest else .linear;
+    return .{
+        .mag_filter = filter,
+        .min_filter = filter,
+        .mipmap_mode = mipmap_mode,
+        .address_mode_u = wrap_u,
+        .address_mode_v = wrap_v,
+        .address_mode_w = .clamp_to_edge,
+        .mip_lod_bias = 0,
+        .anisotropy_enable = .false,
+        .max_anisotropy = 0,
+        .compare_enable = .false,
+        .compare_op = .always,
+        .min_lod = 0,
+        .max_lod = vk.LOD_CLAMP_NONE,
+        .border_color = .int_opaque_white,
+        .unnormalized_coordinates = .false,
+    };
+}
+
 pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
-    // TODO: FIXME: in multiple places here in this function we will leak if error gets thrown
+    if (opt.max_frames_in_flight == 0 or opt.max_textures == 0 or opt.max_vertices_per_frame == 0 or opt.max_indices_per_frame == 0)
+        return error.InvalidOptions;
     const dev = opt.dev;
     const dynamic_rendering = std.meta.activeTag(opt.render_pass) == .dynamic;
-    // Memory
-    slog.debug("host_vis allocation size: {Bi}", .{opt.hostVisibleMemSize()});
-    const host_visible_mem = try dev.allocateMemory(&.{
-        .allocation_size = opt.hostVisibleMemSize(),
-        .memory_type_index = opt.memory.host_vis,
-    }, opt.vk_alloc);
-    errdefer dev.freeMemory(host_visible_mem, opt.vk_alloc);
-    const host_vis_data = @as([*]u8, @ptrCast((try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})).?))[0..opt.hostVisibleMemSize()];
-    // Memory sub-allocation into FrameData
+    const builtin_memory: ?VkMemory = switch (opt.gpu_allocator) {
+        .builtin => |memory| memory,
+        .custom => null,
+    };
+    // Create the streaming buffers first so allocation size, alignment, and the
+    // compatible memory-type intersection come from Vulkan rather than guesses.
     const frames = try alloc.alloc(FrameData, opt.max_frames_in_flight);
-    errdefer alloc.free(frames);
-    {
-        var mem_offset: usize = 0;
+    @memset(frames, FrameData{});
+    var host_visible_mem: vk.DeviceMemory = .null_handle;
+    var host_vis_data: []u8 = &.{};
+    var host_vis_mem_idx: u32 = if (builtin_memory) |memory| memory.host_vis else std.math.maxInt(u32);
+    var host_vis_coherent = true;
+    var host_memory_mapped = false;
+    errdefer {
+        for (frames) |f| {
+            switch (opt.gpu_allocator) {
+                .builtin => {
+                    if (f.vtx_buff != .null_handle) dev.destroyBuffer(f.vtx_buff, opt.vk_alloc);
+                    if (f.idx_buff != .null_handle) dev.destroyBuffer(f.idx_buff, opt.vk_alloc);
+                },
+                .custom => |custom| {
+                    if (f.vtx_resource) |resource| custom.destroy_buffer(custom.userdata, dev, resource);
+                    if (f.idx_resource) |resource| custom.destroy_buffer(custom.userdata, dev, resource);
+                },
+            }
+            if (f.prepass_pool != .null_handle) dev.destroyCommandPool(f.prepass_pool, opt.vk_alloc);
+        }
+        if (host_memory_mapped) dev.unmapMemory(host_visible_mem);
+        if (host_visible_mem != .null_handle) dev.freeMemory(host_visible_mem, opt.vk_alloc);
+        alloc.free(frames);
+    }
+    var host_memory_type_bits: u32 = std.math.maxInt(u32);
+    var host_visible_size: vk.DeviceSize = 0;
+    for (frames) |*f| {
+        const vtx_info = vk.BufferCreateInfo{
+            .size = try std.math.mul(vk.DeviceSize, @sizeOf(Vertex), opt.max_vertices_per_frame),
+            .usage = .{ .vertex_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        };
+        const idx_info = vk.BufferCreateInfo{
+            .size = try std.math.mul(vk.DeviceSize, @sizeOf(Index), opt.max_indices_per_frame),
+            .usage = .{ .index_buffer_bit = true },
+            .sharing_mode = .exclusive,
+        };
+        switch (opt.gpu_allocator) {
+            .builtin => {
+                f.vtx_buff = try dev.createBuffer(&vtx_info, opt.vk_alloc);
+                const vtx_req = dev.getBufferMemoryRequirements(f.vtx_buff);
+                host_memory_type_bits &= vtx_req.memory_type_bits;
+                host_visible_size = std.mem.alignForward(vk.DeviceSize, host_visible_size, vtx_req.alignment);
+                f.vtx_mem_offset = host_visible_size;
+                host_visible_size = try std.math.add(vk.DeviceSize, host_visible_size, vtx_req.size);
+
+                f.idx_buff = try dev.createBuffer(&idx_info, opt.vk_alloc);
+                const idx_req = dev.getBufferMemoryRequirements(f.idx_buff);
+                host_memory_type_bits &= idx_req.memory_type_bits;
+                host_visible_size = std.mem.alignForward(vk.DeviceSize, host_visible_size, idx_req.alignment);
+                f.idx_mem_offset = host_visible_size;
+                host_visible_size = try std.math.add(vk.DeviceSize, host_visible_size, idx_req.size);
+            },
+            .custom => |custom| {
+                const vtx = try custom.create_buffer(custom.userdata, dev, &vtx_info, .streaming);
+                if (vtx.handle == .null_handle or vtx.size < vtx_info.size) {
+                    custom.destroy_buffer(custom.userdata, dev, vtx);
+                    return error.InvalidResourceAllocation;
+                }
+                f.vtx_resource = vtx;
+                f.vtx_buff = vtx.handle;
+                f.vtx_data = vtx.mapped.mappedPtr()[0..@intCast(vtx_info.size)];
+
+                const idx = try custom.create_buffer(custom.userdata, dev, &idx_info, .streaming);
+                if (idx.handle == .null_handle or idx.size < idx_info.size) {
+                    custom.destroy_buffer(custom.userdata, dev, idx);
+                    return error.InvalidResourceAllocation;
+                }
+                f.idx_resource = idx;
+                f.idx_buff = idx.handle;
+                f.idx_data = idx.mapped.mappedPtr()[0..@intCast(idx_info.size)];
+            },
+        }
+
+        f.prepass_pool = try dev.createCommandPool(&.{
+            .flags = .{ .reset_command_buffer_bit = true, .transient_bit = true },
+            .queue_family_index = opt.graphics_queue_family_index,
+        }, opt.vk_alloc);
+        try dev.allocateCommandBuffers(&.{
+            .command_pool = f.prepass_pool,
+            .level = .primary,
+            .command_buffer_count = 1,
+        }, @ptrCast(&f.prepass_cmd));
+    }
+
+    if (std.meta.activeTag(opt.gpu_allocator) == .builtin) {
+        const memory = builtin_memory.?;
+        host_vis_mem_idx = memory.findMemoryType(
+            host_memory_type_bits,
+            .{ .host_visible_bit = true },
+            .{ .device_local_bit = true, .host_coherent_bit = true },
+        ) orelse memory.findMemoryType(host_memory_type_bits, .{ .host_visible_bit = true }, .{ .host_coherent_bit = true }) orelse
+            return error.NoCompatibleMemoryType;
+        host_vis_coherent = memory.properties.memory_types[host_vis_mem_idx].property_flags.host_coherent_bit;
+        slog.debug("host visible allocation size: {Bi}, memory type: {}", .{ host_visible_size, host_vis_mem_idx });
+        host_visible_mem = try dev.allocateMemory(&.{
+            .allocation_size = host_visible_size,
+            .memory_type_index = host_vis_mem_idx,
+        }, opt.vk_alloc);
+        const mapped = (try dev.mapMemory(host_visible_mem, 0, vk.WHOLE_SIZE, .{})) orelse return error.MapMemoryFailed;
+        host_memory_mapped = true;
+        host_vis_data = @as([*]u8, @ptrCast(mapped))[0..@intCast(host_visible_size)];
+
         for (frames) |*f| {
-            f.* = .{};
-            // TODO: on error here cleanup will leak previous initialized frames
-            { // vertex buf
-                const buf = try dev.createBuffer(&.{
-                    .size = @sizeOf(Vertex) * opt.max_vertices_per_frame,
-                    .usage = .{ .vertex_buffer_bit = true },
-                    .sharing_mode = .exclusive,
-                }, opt.vk_alloc);
-                errdefer dev.destroyBuffer(buf, opt.vk_alloc);
-                const mreq = dev.getBufferMemoryRequirements(buf);
-                mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-                try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-                f.vtx_data = host_vis_data[mem_offset..][0..mreq.size];
-                f.vtx_buff = buf;
-                mem_offset += mreq.size;
-            }
-            { // index buf
-                const buf = try dev.createBuffer(&.{
-                    .size = @sizeOf(Indice) * opt.max_indices_per_frame,
-                    .usage = .{ .index_buffer_bit = true },
-                    .sharing_mode = .exclusive,
-                }, opt.vk_alloc);
-                errdefer dev.destroyBuffer(buf, opt.vk_alloc);
-                const mreq = dev.getBufferMemoryRequirements(buf);
-                mem_offset = std.mem.alignForward(usize, mem_offset, mreq.alignment);
-                try dev.bindBufferMemory(buf, host_visible_mem, mem_offset);
-                f.idx_data = host_vis_data[mem_offset..][0..mreq.size];
-                f.idx_buff = buf;
-                mem_offset += mreq.size;
-            }
+            const vtx_req = dev.getBufferMemoryRequirements(f.vtx_buff);
+            try dev.bindBufferMemory(f.vtx_buff, host_visible_mem, f.vtx_mem_offset);
+            f.vtx_data = host_vis_data[@intCast(f.vtx_mem_offset)..][0..@intCast(vtx_req.size)];
+
+            const idx_req = dev.getBufferMemoryRequirements(f.idx_buff);
+            try dev.bindBufferMemory(f.idx_buff, host_visible_mem, f.idx_mem_offset);
+            f.idx_data = host_vis_data[@intCast(f.idx_mem_offset)..][0..@intCast(idx_req.size)];
         }
     }
 
@@ -324,8 +587,8 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .p_pool_sizes = &dpool_sizes,
         .flags = .{ .free_descriptor_set_bit = true },
     }, opt.vk_alloc);
-    // TODO: free?
-    const dsl = if (opt.pipeline_layout != .null_handle) .null_handle else try dev.createDescriptorSetLayout(
+    errdefer dev.destroyDescriptorPool(dpool, opt.vk_alloc);
+    const dsl = try dev.createDescriptorSetLayout(
         &vk.DescriptorSetLayoutCreateInfo{
             .binding_count = 1,
             .p_bindings = &.{
@@ -335,77 +598,55 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
                 //     .descriptor_type = .uniform_buffer,
                 //     .stage_flags = .{ .vertex_bit = true },
                 // },
-                vk.DescriptorSetLayoutBinding{
-                    .binding = tex_binding,
-                    .descriptor_count = 1,
-                    .descriptor_type = .combined_image_sampler,
-                    .stage_flags = .{ .fragment_bit = true },
-                },
+                texture_descriptor_binding,
             },
         },
         opt.vk_alloc,
     );
-    const pipeline_layout = if (opt.pipeline_layout != .null_handle) opt.pipeline_layout else try dev.createPipelineLayout(&.{
-        .flags = .{},
-        .set_layout_count = 1,
-        .p_set_layouts = @ptrCast(&dsl),
-        .push_constant_range_count = 1,
-        .p_push_constant_ranges = &.{.{
-            .stage_flags = .{ .vertex_bit = true },
-            .offset = 0,
-            .size = @sizeOf(f32) * 4,
-        }},
-    }, opt.vk_alloc);
-    errdefer if (opt.pipeline_layout == .null_handle) dev.destroyPipelineLayout(pipeline_layout, opt.vk_alloc);
-
-    const samplers = [_]vk.SamplerCreateInfo{
-        .{ // dvui.TextureInterpolation.nearest
-            .mag_filter = .nearest,
-            .min_filter = .nearest,
-            .mipmap_mode = .nearest,
-            .address_mode_u = opt.texture_wrap,
-            .address_mode_v = opt.texture_wrap,
-            .address_mode_w = opt.texture_wrap,
-            .mip_lod_bias = 0,
-            .anisotropy_enable = .false,
-            .max_anisotropy = 0,
-            .compare_enable = .false,
-            .compare_op = .always,
-            .min_lod = 0,
-            .max_lod = vk.LOD_CLAMP_NONE,
-            .border_color = .int_opaque_white,
-            .unnormalized_coordinates = .false,
-        },
-        .{ // dvui.TextureInterpolation.linear
-            .mag_filter = .linear,
-            .min_filter = .linear,
-            .mipmap_mode = .linear,
-            .address_mode_u = opt.texture_wrap,
-            .address_mode_v = opt.texture_wrap,
-            .address_mode_w = opt.texture_wrap,
-            .mip_lod_bias = 0,
-            .anisotropy_enable = .false,
-            .max_anisotropy = 0,
-            .compare_enable = .false,
-            .compare_op = .always,
-            .min_lod = 0,
-            .max_lod = vk.LOD_CLAMP_NONE,
-            .border_color = .int_opaque_white,
-            .unnormalized_coordinates = .false,
-        },
+    errdefer dev.destroyDescriptorSetLayout(dsl, opt.vk_alloc);
+    const pipeline_layout = switch (opt.pipeline) {
+        .builtin => try dev.createPipelineLayout(&.{
+            .flags = .{},
+            .set_layout_count = 1,
+            .p_set_layouts = @ptrCast(&dsl),
+            .push_constant_range_count = 1,
+            .p_push_constant_ranges = &.{push_constant_range},
+        }, opt.vk_alloc),
+        .borrowed, .transferred => |handles| handles.pipeline_layout,
     };
+    const owns_pipeline_resources = switch (opt.pipeline) {
+        .builtin => true,
+        .borrowed => false,
+        .transferred => true,
+    };
+    errdefer if (owns_pipeline_resources) dev.destroyPipelineLayout(pipeline_layout, opt.vk_alloc);
 
-    const render_target_pass = if (dynamic_rendering) .null_handle else try createOffscreenRenderPass(dev, img_format);
-    errdefer dev.destroyRenderPass(render_target_pass, opt.vk_alloc);
+    const render_target_pass = if (dynamic_rendering) .null_handle else try createOffscreenRenderPass(dev, img_format, .clear, opt.vk_alloc);
+    errdefer if (render_target_pass != .null_handle) dev.destroyRenderPass(render_target_pass, opt.vk_alloc);
+    const render_target_load_pass = if (dynamic_rendering) .null_handle else try createOffscreenRenderPass(dev, img_format, .load, opt.vk_alloc);
+    errdefer if (render_target_load_pass != .null_handle) dev.destroyRenderPass(render_target_load_pass, opt.vk_alloc);
+    const offscreen_rendering: OffscreenRendering = if (dynamic_rendering)
+        .dynamic
+    else
+        .{ .render_passes = .{ .clear = render_target_pass, .load = render_target_load_pass } };
 
-    const pipeline = if (opt.pipeline != .null_handle) opt.pipeline else try createPipeline(dev, pipeline_layout, switch (opt.render_pass) {
-        .static => |s| s,
-        .dynamic => .null_handle,
-    }, switch (opt.render_pass) {
-        .static => null,
-        .dynamic => |s| s,
-    }, opt.vk_alloc);
-    errdefer if (opt.pipeline == .null_handle) dev.destroyPipeline(pipeline, opt.vk_alloc);
+    const pipeline = switch (opt.pipeline) {
+        .builtin => try createPipeline(dev, pipeline_layout, switch (opt.render_pass) {
+            .static => |target| target.render_pass,
+            .dynamic => .null_handle,
+        }, switch (opt.render_pass) {
+            .static => null,
+            .dynamic => |target| target.info,
+        }, switch (opt.render_pass) {
+            .static => |target| target.subpass,
+            .dynamic => 0,
+        }, switch (opt.render_pass) {
+            .static => |target| target.samples,
+            .dynamic => |target| target.samples,
+        }, opt.vk_alloc),
+        .borrowed, .transferred => |handles| handles.pipeline,
+    };
+    errdefer if (owns_pipeline_resources) dev.destroyPipeline(pipeline, opt.vk_alloc);
 
     const render_target_pipeline = try createPipeline(dev, pipeline_layout, render_target_pass, if (render_target_pass == .null_handle) vk.PipelineRenderingCreateInfo{
         .color_attachment_count = 1,
@@ -413,45 +654,69 @@ pub fn init(alloc: std.mem.Allocator, opt: InitOptions) !Self {
         .p_color_attachment_formats = &[_]vk.Format{img_format},
         .depth_attachment_format = .undefined,
         .stencil_attachment_format = .undefined,
-    } else null, opt.vk_alloc);
+    } else null, 0, .{ .@"1_bit" = true }, opt.vk_alloc);
+    errdefer dev.destroyPipeline(render_target_pipeline, opt.vk_alloc);
+
+    var samplers: [10]vk.Sampler = @splat(.null_handle);
+    var sampler_count: usize = 0;
+    errdefer for (samplers[0..sampler_count]) |sampler| dev.destroySampler(sampler, opt.vk_alloc);
+    for (0..8) |i| {
+        const interpolation: dvui.enums.TextureInterpolation = if (i / 4 == 0) .nearest else .linear;
+        const wrap_u: vk.SamplerAddressMode = if ((i / 2) % 2 == 0) .clamp_to_edge else .repeat;
+        const wrap_v: vk.SamplerAddressMode = if (i % 2 == 0) .clamp_to_edge else .repeat;
+        samplers[i] = try dev.createSampler(&samplerCreateInfo(interpolation, wrap_u, wrap_v), opt.vk_alloc);
+        sampler_count += 1;
+    }
+    for (samplers[8..], 0..) |*sampler, i| {
+        const interpolation: dvui.enums.TextureInterpolation = if (i == 0) .nearest else .linear;
+        sampler.* = try dev.createSampler(&samplerCreateInfo(interpolation, opt.texture_wrap, opt.texture_wrap), opt.vk_alloc);
+        sampler_count += 1;
+    }
+
+    const textures = try alloc.alloc(Texture, opt.max_textures);
+    errdefer alloc.free(textures);
+    @memset(textures, Texture{});
+    const destroy_textures = try alloc.alloc(u16, opt.max_textures);
+    errdefer alloc.free(destroy_textures);
 
     var res: Self = .{
-        .dynamic = if (dynamic_rendering) opt.render_pass.dynamic else undefined,
+        .allocator = alloc,
         .dev = dev,
         .dpool = dpool,
-        .pdev = opt.pdev,
         .vk_alloc = opt.vk_alloc,
 
         .dset_layout = dsl,
-        .samplers = .{
-            try dev.createSampler(&samplers[0], opt.vk_alloc),
-            try dev.createSampler(&samplers[1], opt.vk_alloc),
-        },
-        .textures = try alloc.alloc(Texture, opt.max_textures),
-        .destroy_textures = try alloc.alloc(u16, opt.max_textures),
-        .render_target_pass = render_target_pass,
+        .samplers = samplers,
+        .textures = textures,
+        .destroy_textures = destroy_textures,
+        .offscreen_rendering = offscreen_rendering,
         .render_target_pipeline = render_target_pipeline,
         .pipeline = pipeline,
         .pipeline_layout = pipeline_layout,
-        .host_vis_mem_idx = opt.memory.host_vis,
+        .owns_pipeline_resources = owns_pipeline_resources,
+        .host_vis_mem_idx = host_vis_mem_idx,
         .host_vis_mem = host_visible_mem,
         .host_vis_data = host_vis_data,
-        .host_vis_coherent = opt.memory.host_coherent,
-        .device_local_mem_idx = opt.memory.device_local,
-        .queue = opt.queue,
-        .cpool = opt.comamnd_pool,
+        .host_vis_coherent = host_vis_coherent,
+        .device_local_mem_idx = if (builtin_memory) |memory| memory.device_local else std.math.maxInt(u32),
+        .gpu_allocator = opt.gpu_allocator,
+        .submit_prepass = opt.submit_prepass,
         .frames = frames,
         .current_frame = &frames[0],
     };
-    @memset(res.textures, Texture{});
-
-    res.dummy_texture = try res.createAndUplaodTexture(&[4]u8{ 255, 255, 255, 255 }, 1, 1, .nearest);
-    res.error_texture = try res.createAndUplaodTexture(&opt.error_texture_color, 1, 1, .nearest);
+    res.dummy_texture = try res.createAndUploadTexture(&[4]u8{ 255, 255, 255, 255 }, 1, 1, .nearest);
+    res.error_texture = res.createAndUploadTexture(&opt.error_texture_color, 1, 1, .nearest) catch |err| {
+        for (res.pending_uploads.items) |upload| res.destroyAllocatedBuffer(upload.staging);
+        res.pending_uploads.deinit(alloc);
+        res.dummy_texture.deinit(&res);
+        return err;
+    };
     return res;
 }
 
-/// for sync safety, better call queueWaitIdle before destruction
-pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+/// The caller must ensure all GPU work using this renderer has completed.
+pub fn deinit(self: *Self) void {
+    const alloc = self.allocator;
     for (self.frames) |*f| f.deinit(self);
     alloc.free(self.frames);
     for (self.textures, 0..) |tex, i| if (!tex.isNull()) {
@@ -461,21 +726,33 @@ pub fn deinit(self: *Self, alloc: std.mem.Allocator) void {
     };
     alloc.free(self.textures);
     alloc.free(self.destroy_textures);
+    for (self.pending_uploads.items) |upload| {
+        self.destroyAllocatedBuffer(upload.staging);
+    }
+    self.pending_uploads.deinit(alloc);
 
     self.dummy_texture.deinit(self);
     self.error_texture.deinit(self);
     for (self.samplers) |s| self.dev.destroySampler(s, self.vk_alloc);
 
+    self.dev.destroyPipeline(self.render_target_pipeline, self.vk_alloc);
+    if (self.owns_pipeline_resources) {
+        self.dev.destroyPipeline(self.pipeline, self.vk_alloc);
+        self.dev.destroyPipelineLayout(self.pipeline_layout, self.vk_alloc);
+    }
     self.dev.destroyDescriptorPool(self.dpool, self.vk_alloc);
     self.dev.destroyDescriptorSetLayout(self.dset_layout, self.vk_alloc);
-    self.dev.destroyPipelineLayout(self.pipeline_layout, self.vk_alloc);
-    self.dev.destroyPipeline(self.render_target_pipeline, self.vk_alloc);
-    if (self.render_target_pass != .null_handle) {
-        self.dev.destroyRenderPass(self.render_target_pass, self.vk_alloc);
+    switch (self.offscreen_rendering) {
+        .dynamic => {},
+        .render_passes => |passes| {
+            self.dev.destroyRenderPass(passes.load, self.vk_alloc);
+            self.dev.destroyRenderPass(passes.clear, self.vk_alloc);
+        },
     }
-    self.dev.destroyPipeline(self.pipeline, self.vk_alloc);
-    self.dev.unmapMemory(self.host_vis_mem);
-    self.dev.freeMemory(self.host_vis_mem, self.vk_alloc);
+    if (self.host_vis_mem != .null_handle) {
+        self.dev.unmapMemory(self.host_vis_mem);
+        self.dev.freeMemory(self.host_vis_mem, self.vk_alloc);
+    }
     // self.dev.destroyRenderPass(self.render_pass_texture_target, self.vk_alloc);
 }
 
@@ -484,9 +761,13 @@ pub const RenderPassInfo = struct {
     render_area: vk.Rect2D,
 };
 
-/// Begins new frame
-/// Command buffer has to be in a render pass
-pub fn beginFrame(self: *Self, cmdbuf: vk.CommandBuffer, framebuffer_size: vk.Extent2D) void {
+/// Begins a new frame. `cmdbuf` must be inside a compatible render pass or dynamic
+/// rendering instance when DVUI records screen draws.
+///
+/// Before the Nth subsequent call (where N is `max_frames_in_flight`), the caller
+/// must ensure that GPU work recorded by this call has completed.
+pub fn beginFrame(self: *Self, cmdbuf: vk.CommandBuffer, framebuffer_size: vk.Extent2D) !void {
+    if (self.frame_active) return error.FrameAlreadyActive;
     self.cmdbuf = cmdbuf;
     self.framebuffer_size = framebuffer_size;
 
@@ -499,7 +780,10 @@ pub fn beginFrame(self: *Self, cmdbuf: vk.CommandBuffer, framebuffer_size: vk.Ex
     cf.freeTextures(self);
 
     // reset frame data
-    self.current_frame.reset(self);
+    try self.current_frame.reset(self);
+    self.frame_active = true;
+    errdefer self.frame_active = false;
+    try self.recordPendingUploads();
     self.stats.draw_calls = 0;
     self.stats.indices = 0;
     self.stats.verts = 0;
@@ -507,14 +791,30 @@ pub fn beginFrame(self: *Self, cmdbuf: vk.CommandBuffer, framebuffer_size: vk.Ex
     self.idx_overflow_logged = false;
 }
 
-/// Ends current frame
-/// returns command buffer (same one given at init)
-pub fn endFrame(self: *Self) vk.CommandBuffer {
-    if (self.render_target) unreachable;
-    const cmdbuf = self.cmdbuf;
-    // if (self.dynamicRendering()) self.dev.cmdEndRendering(cmdbuf) else self.dev.cmdEndRenderPass(cmdbuf);
+pub const RecordedFrame = struct {
+    /// Submit before `main`. Null when no prepass was needed or `submit_prepass`
+    /// already submitted it.
+    prepass: ?vk.CommandBuffer,
+    /// The same application-owned command buffer passed to `beginFrame`.
+    main: vk.CommandBuffer,
+};
+
+/// Finalizes renderer recording for the current frame. Applications which do
+/// not configure `submit_prepass` must submit the returned prepass, when non-null,
+/// before the main command buffer and include both in the same frame-completion
+/// synchronization scope.
+pub fn endFrame(self: *Self) !RecordedFrame {
+    const prepass = try self.finishPrepass();
+    if (prepass != null and self.submit_prepass != null) try self.submitConfiguredPrepass(prepass.?);
+
+    const result: RecordedFrame = .{
+        .prepass = if (prepass != null and !self.current_frame.prepass_delivered) prepass else null,
+        .main = self.cmdbuf,
+    };
+    if (result.prepass != null) self.current_frame.prepass_delivered = true;
+    self.frame_active = false;
     self.cmdbuf = .null_handle;
-    return cmdbuf;
+    return result;
 }
 
 //
@@ -525,7 +825,7 @@ const Backend = Self;
 
 pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.Physical) void {
     _ = arena; // autofix
-    self.render_target = null;
+    self.active_render_target = null;
     if (self.cmdbuf == .null_handle) @panic("dvui_vulkan_renderer: Command bufer not set! (missing beginFrame()?)");
 
     const dev = self.dev;
@@ -550,20 +850,95 @@ pub fn begin(self: *Self, arena: std.mem.Allocator, framebuffer_size: dvui.Size.
 }
 
 pub fn end(self: *Backend) void {
-    _ = self; // autofix
+    defer self.frame_active = false;
+    const prepass = self.finishPrepass() catch |err| {
+        slog.err("failed to finalize renderer prepass: {}", .{err});
+        return;
+    };
+    if (prepass) |cmdbuf| self.submitConfiguredPrepass(cmdbuf) catch |err| {
+        slog.err("failed to submit renderer prepass: {}", .{err});
+    };
+}
+
+fn finishPrepass(self: *Self) !?vk.CommandBuffer {
+    self.finishOffscreenTarget(true);
+    self.flushFrameWrites();
+
+    const frame = self.current_frame;
+    if (!frame.prepass_finalized) {
+        try self.dev.endCommandBuffer(frame.prepass_cmd);
+        frame.prepass_finalized = true;
+    }
+    return if (frame.prepass_used) frame.prepass_cmd else null;
+}
+
+fn submitConfiguredPrepass(self: *Self, cmdbuf: vk.CommandBuffer) !void {
+    const frame = self.current_frame;
+    if (frame.prepass_delivered) return;
+    const submit = self.submit_prepass orelse return;
+    try submit.submit(submit.userdata, cmdbuf);
+    frame.prepass_delivered = true;
+}
+
+fn flushFrameWrites(self: *Self) void {
+    const frame = self.current_frame;
+    switch (self.gpu_allocator) {
+        .builtin => {
+            if (!self.host_vis_coherent) {
+                self.flushBuiltinRange(frame.vtx_mem_offset, frame.vtx_dirty_start, frame.vtx_dirty_end);
+                self.flushBuiltinRange(frame.idx_mem_offset, frame.idx_dirty_start, frame.idx_dirty_end);
+            }
+        },
+        .custom => |custom| {
+            self.flushCustomRange(custom, frame.vtx_resource.?, frame.vtx_dirty_start, frame.vtx_dirty_end);
+            self.flushCustomRange(custom, frame.idx_resource.?, frame.idx_dirty_start, frame.idx_dirty_end);
+        },
+    }
+    frame.vtx_dirty_start = std.math.maxInt(vk.DeviceSize);
+    frame.vtx_dirty_end = 0;
+    frame.idx_dirty_start = std.math.maxInt(vk.DeviceSize);
+    frame.idx_dirty_end = 0;
+}
+
+fn flushBuiltinRange(self: *Self, base: vk.DeviceSize, dirty_start: vk.DeviceSize, dirty_end: vk.DeviceSize) void {
+    if (dirty_start == std.math.maxInt(vk.DeviceSize)) return;
+    const atom = self.gpu_allocator.builtin.non_coherent_atom_size;
+    const allocation_size: vk.DeviceSize = @intCast(self.host_vis_data.len);
+    const flush_start = std.mem.alignBackward(vk.DeviceSize, base + dirty_start, atom);
+    const flush_end = @min(std.mem.alignForward(vk.DeviceSize, base + dirty_end, atom), allocation_size);
+    self.dev.flushMappedMemoryRanges(&.{.{
+        .memory = self.host_vis_mem,
+        .offset = flush_start,
+        .size = flush_end - flush_start,
+    }}) catch |err| slog.err("flushMappedMemoryRanges: {}", .{err});
+}
+
+fn flushCustomRange(self: *Self, custom: ResourceAllocator, buffer: BufferAllocation, dirty_start: vk.DeviceSize, dirty_end: vk.DeviceSize) void {
+    if (dirty_start == std.math.maxInt(vk.DeviceSize)) return;
+    switch (buffer.mapped) {
+        .coherent => {},
+        .non_coherent => |memory| memory.flush(
+            custom.userdata,
+            self.dev,
+            buffer.handle,
+            buffer.allocation,
+            dirty_start,
+            dirty_end - dirty_start,
+        ) catch |err| slog.err("custom GPU allocator failed to flush streaming buffer: {}", .{err}),
+    }
 }
 
 pub fn pixelSize(self: *Backend) Size {
     return .{ .w = @floatFromInt(self.framebuffer_size.width), .h = @floatFromInt(self.framebuffer_size.height) };
 }
 
-pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []const Vertex, idx: []const Indice, clipr: ?dvui.Rect.Physical) void {
+pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []const Vertex, idx: []const Index, clipr: ?dvui.Rect.Physical) void {
     const texture: ?*anyopaque = if (texture_) |t| @as(*anyopaque, @ptrCast(@alignCast(t.ptr))) else null;
     const dev = self.dev;
-    const cmdbuf = if (self.render_target) |t| t else self.cmdbuf;
+    const cmdbuf = if (self.active_render_target) |target| target.command_buffer else self.cmdbuf;
     const cf = self.current_frame;
     const vtx_bytes = vtx.len * @sizeOf(Vertex);
-    const idx_bytes = idx.len * @sizeOf(Indice);
+    const idx_bytes = idx.len * @sizeOf(Index);
 
     { // updates stats even if draw is skipped due to overflow
         self.stats.draw_calls += 1;
@@ -586,12 +961,21 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
     }
 
     { // clip / scissor
-        const scissor = if (clipr) |c| vk.Rect2D{
-            .offset = .{ .x = @intFromFloat(@max(0, c.x)), .y = @intFromFloat(@max(0, c.y)) },
-            .extent = .{ .width = @intFromFloat(c.w), .height = @intFromFloat(c.h) },
+        const active_extent = if (self.active_render_target) |target| target.extent else self.framebuffer_size;
+        const scissor = if (clipr) |c| blk: {
+            const max_x: f32 = @floatFromInt(active_extent.width);
+            const max_y: f32 = @floatFromInt(active_extent.height);
+            const x0 = std.math.clamp(c.x, 0, max_x);
+            const y0 = std.math.clamp(c.y, 0, max_y);
+            const x1 = std.math.clamp(c.x + @max(0, c.w), x0, max_x);
+            const y1 = std.math.clamp(c.y + @max(0, c.h), y0, max_y);
+            break :blk vk.Rect2D{
+                .offset = .{ .x = @intFromFloat(x0), .y = @intFromFloat(y0) },
+                .extent = .{ .width = @intFromFloat(x1 - x0), .height = @intFromFloat(y1 - y0) },
+            };
         } else vk.Rect2D{
             .offset = .{ .x = 0, .y = 0 },
-            .extent = self.framebuffer_size,
+            .extent = active_extent,
         };
         dev.cmdSetScissor(cmdbuf, 0, &.{scissor});
     }
@@ -599,25 +983,25 @@ pub fn drawClippedTriangles(self: *Backend, texture_: ?dvui.Texture, vtx: []cons
     const idx_offset: u32 = cf.idx_offset;
     const vtx_offset: u32 = cf.vtx_offset;
     { // upload indices & vertices
-        var modified_ranges: [2]vk.MappedMemoryRange = undefined;
         { // indices
+            const dirty_start = cf.idx_offset;
             const dst = cf.idx_data[cf.idx_offset..][0..idx_bytes];
             cf.idx_offset += @intCast(dst.len);
-            modified_ranges[0] = .{ .memory = self.host_vis_mem, .offset = @intFromPtr(dst.ptr) - @intFromPtr(self.host_vis_data.ptr), .size = dst.len };
+            cf.idx_dirty_start = @min(cf.idx_dirty_start, dirty_start);
+            cf.idx_dirty_end = @max(cf.idx_dirty_end, cf.idx_offset);
             @memcpy(dst, std.mem.sliceAsBytes(idx));
         }
         { // vertices
+            const dirty_start = cf.vtx_offset;
             const dst = cf.vtx_data[cf.vtx_offset..][0..vtx_bytes];
             cf.vtx_offset += @intCast(dst.len);
-            modified_ranges[1] = .{ .memory = self.host_vis_mem, .offset = @intFromPtr(dst.ptr) - @intFromPtr(self.host_vis_data.ptr), .size = dst.len };
+            cf.vtx_dirty_start = @min(cf.vtx_dirty_start, dirty_start);
+            cf.vtx_dirty_end = @max(cf.vtx_dirty_end, cf.vtx_offset);
             @memcpy(dst, std.mem.sliceAsBytes(vtx));
         }
-        if (!self.host_vis_coherent)
-            dev.flushMappedMemoryRanges(&modified_ranges) catch |err|
-                slog.err("flushMappedMemoryRanges: {}", .{err});
     }
 
-    if (@sizeOf(Indice) != 2) unreachable;
+    if (@sizeOf(Index) != 2) unreachable;
     dev.cmdBindIndexBuffer(cmdbuf, cf.idx_buff, idx_offset, .uint16);
     dev.cmdBindVertexBuffers(cmdbuf, 0, &.{cf.vtx_buff}, &.{vtx_offset});
     const dset: vk.DescriptorSet = if (texture == null) self.dummy_texture.dset else blk: {
@@ -658,7 +1042,7 @@ pub fn textureCreate(self: *Backend, pixels: [*]const u8, options: dvui.Texture.
         .wrap_v = options.wrap_v,
     };
     const out_tex: *Texture = &self.textures[slot];
-    const tex = self.createAndUplaodTexture(pixels, options.width, options.height, options.interpolation) catch |err| {
+    const tex = self.createAndUploadTextureWithSampler(pixels, options.width, options.height, samplerSlot(options.interpolation, options.wrap_u, options.wrap_v)) catch |err| {
         if (enable_breakpoints) @breakpoint();
         slog.err("Can't create texture: {}", .{err});
         return error.TextureCreate;
@@ -667,7 +1051,7 @@ pub fn textureCreate(self: *Backend, pixels: [*]const u8, options: dvui.Texture.
     out_tex.trace.addAddr(@returnAddress(), "create");
 
     self.stats.textures_alive += 1;
-    self.stats.textures_mem += self.dev.getImageMemoryRequirements(out_tex.img).size;
+    self.stats.textures_mem += out_tex.allocation_size;
     //slog.debug("textureCreate {} ({x}) | {}", .{ slot, @intFromPtr(out_tex), self.stats.textures_alive });
     return .{
         .ptr = @ptrCast(out_tex),
@@ -685,7 +1069,7 @@ pub fn textureCreateTarget(self: *Backend, options: dvui.Texture.CreateOptions) 
     const tex_slot = self.findEmptyTextureSlot() orelse return error.OutOfMemory;
 
     const dev = self.dev;
-    var tex = self.createTextureWithMem(.{
+    var tex = self.createTextureWithSampler(.{
         .image_type = .@"2d",
         .format = img_format,
         .extent = .{ .width = options.width, .height = options.height, .depth = 1 },
@@ -699,7 +1083,7 @@ pub fn textureCreateTarget(self: *Backend, options: dvui.Texture.CreateOptions) 
         },
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
-    }, options.interpolation) catch |err| {
+    }, samplerSlot(options.interpolation, options.wrap_u, options.wrap_v)) catch |err| {
         if (enable_breakpoints) @breakpoint();
         slog.err("textureCreateTarget failed to create framebuffer: {}", .{err});
         return error.BackendError;
@@ -708,7 +1092,7 @@ pub fn textureCreateTarget(self: *Backend, options: dvui.Texture.CreateOptions) 
 
     tex.framebuffer = if (self.dynamicRendering()) .null_handle else dev.createFramebuffer(&.{
         .flags = .{},
-        .render_pass = self.render_target_pass,
+        .render_pass = self.offscreen_rendering.render_passes.clear,
         .attachment_count = 1,
         .p_attachments = @ptrCast(&tex.img_view),
         .width = options.width,
@@ -723,7 +1107,7 @@ pub fn textureCreateTarget(self: *Backend, options: dvui.Texture.CreateOptions) 
 
     self.textures[tex_slot] = tex;
     self.stats.textures_alive += 1;
-    self.stats.textures_mem += self.dev.getImageMemoryRequirements(tex.img).size;
+    self.stats.textures_mem += tex.allocation_size;
     return .{
         .ptr = &self.textures[tex_slot],
         .width = options.width,
@@ -743,9 +1127,7 @@ pub fn textureDestroy(self: *Backend, texture: dvui.Texture) void {
     if (texture.ptr == invalid_texture) return;
     const dslot = self.destroy_textures_offset;
     self.destroy_textures_offset = (dslot + 1) % @as(u16, @intCast(self.destroy_textures.len));
-    if (self.destroy_textures[dslot] != 0xFFFF) {
-        self.destroy_textures[dslot] = @intCast((@intFromPtr(texture.ptr) - @intFromPtr(self.textures.ptr)) / @sizeOf(Texture));
-    }
+    self.destroy_textures[dslot] = @intCast((@intFromPtr(texture.ptr) - @intFromPtr(self.textures.ptr)) / @sizeOf(Texture));
     self.current_frame.destroy_textures_len += 1;
     // slog.debug("schedule destroy texture: {} ({x})", .{ self.destroy_textures[dslot], @intFromPtr(texture) });
 }
@@ -768,64 +1150,75 @@ pub fn textureFromTarget(self: *Backend, texture_target: dvui.TextureTarget) dvu
 }
 
 pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) GenericError!void {
-    const srr = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .color_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = 0,
-        .layer_count = 1,
+    if (!self.frame_active) return error.BackendError;
+    const requested_texture: ?*Texture = if (dvui_texture_target) |t| @ptrCast(@alignCast(t.ptr)) else null;
+    if (requested_texture != null and self.active_render_target != null and requested_texture == self.active_render_target.?.texture) return;
+
+    self.finishOffscreenTarget(true);
+
+    const texture = requested_texture orelse return;
+    const target = dvui_texture_target.?;
+    self.beginOffscreenTarget(texture, .{ .width = target.width, .height = target.height }, .clear);
+}
+
+fn finishOffscreenTarget(self: *Self, make_sampled: bool) void {
+    const target = self.active_render_target orelse return;
+
+    if (self.dynamicRendering()) self.dev.cmdEndRendering(target.command_buffer) else self.dev.cmdEndRenderPass(target.command_buffer);
+    self.active_render_target = null;
+
+    if (!make_sampled) return;
+    const barrier = vk.ImageMemoryBarrier{
+        .src_access_mask = .{ .color_attachment_write_bit = true },
+        .dst_access_mask = .{ .shader_read_bit = true },
+        .old_layout = .color_attachment_optimal,
+        .new_layout = .shader_read_only_optimal,
+        .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+        .image = target.texture.img,
+        .subresource_range = colorSubresourceRange(),
     };
-    // TODO: all errors are set to unreachable, add handling?
+    self.dev.cmdPipelineBarrier(target.command_buffer, .{ .color_attachment_output_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{barrier});
+    target.texture.layout = .shader_read_only_optimal;
+}
+
+fn beginOffscreenTarget(self: *Self, texture: *Texture, extent: vk.Extent2D, load_op: vk.AttachmentLoadOp) void {
+    std.debug.assert(self.active_render_target == null);
     const dev = self.dev;
+    const cmdbuf = self.current_frame.prepass_cmd;
+    self.current_frame.prepass_used = true;
 
-    if (self.render_target) |cmdbuf| { // finalize previous render target
-        self.render_target = null;
-        defer self.render_target_tex = .null_handle;
-        if (self.dynamicRendering()) self.dev.cmdEndRendering(cmdbuf) else self.dev.cmdEndRenderPass(cmdbuf);
-        if (self.dynamicRendering()) { // transition to read only optimal
-            const img_barrier = vk.ImageMemoryBarrier{
-                .src_access_mask = .{ .color_attachment_write_bit = true },
-                .dst_access_mask = .{ .shader_read_bit = true },
-                .old_layout = .color_attachment_optimal,
-                .new_layout = .shader_read_only_optimal,
-                .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-                .image = self.render_target_tex,
-                .subresource_range = srr,
-            };
-            dev.cmdPipelineBarrier(cmdbuf, .{ .color_attachment_output_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{img_barrier});
-        }
-        // TODO: transition to shader_src_optimal
-        self.endSingleTimeCommands(cmdbuf) catch unreachable;
-        return;
-    }
-
-    const texture: *Texture = if (dvui_texture_target) |t| @ptrCast(@alignCast(t.ptr)) else return;
-    self.render_target_tex = texture.img;
-    const cmdbuf = self.beginSingleTimeCommands() catch unreachable;
-
-    { // transition to color attachment optimal
+    if (texture.layout != .color_attachment_optimal or load_op == .load) {
         const img_barrier = vk.ImageMemoryBarrier{
-            .old_layout = .undefined,
-            .src_access_mask = .{},
-            .dst_access_mask = .{},
+            .old_layout = texture.layout,
+            .src_access_mask = if (texture.layout == .shader_read_only_optimal)
+                .{ .shader_read_bit = true }
+            else if (texture.layout == .color_attachment_optimal)
+                .{ .color_attachment_read_bit = true, .color_attachment_write_bit = true }
+            else
+                .{},
+            .dst_access_mask = if (load_op == .load)
+                .{ .color_attachment_read_bit = true, .color_attachment_write_bit = true }
+            else
+                .{ .color_attachment_write_bit = true },
             .new_layout = .color_attachment_optimal,
             .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
             .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = self.render_target_tex,
-            .subresource_range = .{
-                .aspect_mask = .{ .color_bit = true },
-                .base_mip_level = 0,
-                .level_count = 1,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
+            .image = texture.img,
+            .subresource_range = colorSubresourceRange(),
         };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .top_of_pipe_bit = true }, .{ .color_attachment_output_bit = true }, .{}, null, null, &.{img_barrier});
+        const src_stage: vk.PipelineStageFlags = if (texture.layout == .shader_read_only_optimal)
+            .{ .fragment_shader_bit = true }
+        else if (texture.layout == .color_attachment_optimal)
+            .{ .color_attachment_output_bit = true }
+        else
+            .{ .top_of_pipe_bit = true };
+        dev.cmdPipelineBarrier(cmdbuf, src_stage, .{ .color_attachment_output_bit = true }, .{}, null, null, &.{img_barrier});
     }
+    texture.layout = .color_attachment_optimal;
 
-    const w: f32 = @floatFromInt(self.framebuffer_size.width); // @floatFromInt(tt.fb_size.width)
-    const h: f32 = @floatFromInt(self.framebuffer_size.height); // @floatFromInt(tt.fb_size.height)
+    const w: f32 = @floatFromInt(extent.width);
+    const h: f32 = @floatFromInt(extent.height);
     { // begin render-pass & reset viewport
         dev.cmdBindPipeline(cmdbuf, .graphics, self.render_target_pipeline);
         const clear = vk.ClearValue{
@@ -842,7 +1235,7 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
 
         if (texture.img_view == .null_handle) unreachable;
         if (self.dynamicRendering()) dev.cmdBeginRendering(cmdbuf, &.{
-            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = .{ .width = dvui_texture_target.?.width, .height = dvui_texture_target.?.height } },
+            .render_area = .{ .offset = .{ .x = 0, .y = 0 }, .extent = extent },
             .view_mask = 0,
             .layer_count = 1,
             .color_attachment_count = 1,
@@ -852,20 +1245,23 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
                 .resolve_mode = .{},
                 .resolve_image_view = .null_handle,
                 .resolve_image_layout = .color_attachment_optimal,
-                .load_op = .clear,
+                .load_op = load_op,
                 .store_op = .store,
                 .clear_value = .{ .color = .{ .float_32 = .{ 0, 0, 0, 0 } } },
             }},
             .p_depth_attachment = null,
         }) else dev.cmdBeginRenderPass(cmdbuf, &.{
-            .render_pass = self.render_target_pass,
+            .render_pass = if (load_op == .clear)
+                self.offscreen_rendering.render_passes.clear
+            else
+                self.offscreen_rendering.render_passes.load,
             .framebuffer = texture.framebuffer,
             .render_area = vk.Rect2D{
                 .offset = .{ .x = 0, .y = 0 },
-                .extent = .{ .width = dvui_texture_target.?.width, .height = dvui_texture_target.?.height },
+                .extent = extent,
             },
-            .clear_value_count = 1,
-            .p_clear_values = @ptrCast(&clear),
+            .clear_value_count = if (load_op == .clear) 1 else 0,
+            .p_clear_values = if (load_op == .clear) @ptrCast(&clear) else null,
         }, .@"inline");
         dev.cmdSetViewport(cmdbuf, 0, &.{viewport});
     }
@@ -876,7 +1272,21 @@ pub fn renderTarget(self: *Backend, dvui_texture_target: ?dvui.TextureTarget) Ge
     };
     dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
 
-    self.render_target = cmdbuf; // activate render-texture on success
+    self.active_render_target = .{
+        .command_buffer = cmdbuf,
+        .texture = texture,
+        .extent = extent,
+    };
+}
+
+fn colorSubresourceRange() vk.ImageSubresourceRange {
+    return .{
+        .aspect_mask = .{ .color_bit = true },
+        .base_mip_level = 0,
+        .level_count = 1,
+        .base_array_layer = 0,
+        .layer_count = 1,
+    };
 }
 
 //
@@ -887,9 +1297,12 @@ const Texture = struct {
     img: vk.Image = .null_handle,
     img_view: vk.ImageView = .null_handle,
     mem: vk.DeviceMemory = .null_handle,
+    custom_resource: ?ImageAllocation = null,
+    allocation_size: vk.DeviceSize = 0,
     dset: vk.DescriptorSet = .null_handle,
     /// for render-textures only
     framebuffer: vk.Framebuffer = .null_handle,
+    layout: vk.ImageLayout = .undefined,
 
     trace: Trace = Trace.init,
     const Trace = std.debug.ConfigurableTrace(6, 5, texture_tracing);
@@ -899,13 +1312,19 @@ const Texture = struct {
     }
 
     pub fn deinit(tex: Texture, b: *Backend) void {
+        if (tex.isNull()) return;
         const dev = b.dev;
         const vk_alloc = b.vk_alloc;
         dev.freeDescriptorSets(b.dpool, &.{tex.dset}) catch |err| slog.err("Failed to free descriptor set: {}", .{err});
-        dev.destroyImageView(tex.img_view, vk_alloc);
-        dev.destroyImage(tex.img, vk_alloc);
-        dev.freeMemory(tex.mem, vk_alloc);
         dev.destroyFramebuffer(tex.framebuffer, vk_alloc);
+        dev.destroyImageView(tex.img_view, vk_alloc);
+        if (tex.custom_resource) |resource| {
+            const custom = b.gpu_allocator.custom;
+            custom.destroy_image(custom.userdata, dev, resource);
+        } else {
+            dev.destroyImage(tex.img, vk_alloc);
+            dev.freeMemory(tex.mem, vk_alloc);
+        }
     }
 };
 
@@ -914,6 +1333,8 @@ fn createPipeline(
     layout: vk.PipelineLayout,
     render_pass: vk.RenderPass,
     dynamic_render_pass: ?vk.PipelineRenderingCreateInfo, // render_pass must be null
+    subpass: u32,
+    samples: vk.SampleCountFlags,
     vk_alloc: ?*vk.AllocationCallbacks,
 ) DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
     if (dynamic_render_pass != null and render_pass != .null_handle) unreachable;
@@ -981,30 +1402,18 @@ fn createPipeline(
     };
 
     const pmsci = vk.PipelineMultisampleStateCreateInfo{
-        .rasterization_samples = .{ .@"1_bit" = true },
+        .rasterization_samples = samples,
         .sample_shading_enable = .false,
         .min_sample_shading = 1,
         .alpha_to_coverage_enable = .false,
         .alpha_to_one_enable = .false,
     };
 
-    // do premultiplied alpha blending:
-    const pcbas = vk.PipelineColorBlendAttachmentState{
-        .blend_enable = .true,
-        .src_color_blend_factor = .one,
-        .dst_color_blend_factor = .one_minus_src_alpha,
-        .color_blend_op = .add,
-        .src_alpha_blend_factor = .one,
-        .dst_alpha_blend_factor = .one_minus_src_alpha,
-        .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
-    };
-
     const pcbsci = vk.PipelineColorBlendStateCreateInfo{
         .logic_op_enable = .false,
         .logic_op = .copy,
         .attachment_count = 1,
-        .p_attachments = @ptrCast(&pcbas),
+        .p_attachments = @ptrCast(&premultiplied_alpha_blend),
         .blend_constants = [_]f32{ 0, 0, 0, 0 },
     };
 
@@ -1041,7 +1450,7 @@ fn createPipeline(
         .p_dynamic_state = &pdsci,
         .layout = layout,
         .render_pass = render_pass,
-        .subpass = 0,
+        .subpass = subpass,
         .base_pipeline_handle = .null_handle,
         .base_pipeline_index = -1,
         .p_next = if (dynamic_render_pass) |s| &s else null,
@@ -1060,7 +1469,15 @@ fn createPipeline(
 
 const AllocatedBuffer = struct {
     buf: vk.Buffer,
-    mem: vk.DeviceMemory,
+    mem: vk.DeviceMemory = .null_handle,
+    custom_resource: ?BufferAllocation = null,
+};
+
+const PendingUpload = struct {
+    image: vk.Image,
+    width: u32,
+    height: u32,
+    staging: AllocatedBuffer,
 };
 
 /// allocates space for staging, creates buffer, and copies content to it
@@ -1069,81 +1486,175 @@ fn stageToBuffer(
     buf_info: vk.BufferCreateInfo,
     contents: []const u8,
 ) !AllocatedBuffer {
+    if (std.meta.activeTag(self.gpu_allocator) == .custom) {
+        const custom = self.gpu_allocator.custom;
+        const resource = try custom.create_buffer(custom.userdata, self.dev, &buf_info, .upload);
+        errdefer custom.destroy_buffer(custom.userdata, self.dev, resource);
+        if (resource.handle == .null_handle or resource.size < buf_info.size)
+            return error.InvalidResourceAllocation;
+        @memcpy(resource.mapped.mappedPtr()[0..contents.len], contents);
+        switch (resource.mapped) {
+            .coherent => {},
+            .non_coherent => |memory| try memory.flush(custom.userdata, self.dev, resource.handle, resource.allocation, 0, contents.len),
+        }
+        return .{ .buf = resource.handle, .custom_resource = resource };
+    }
+
     const buf = self.dev.createBuffer(&buf_info, self.vk_alloc) catch |err| {
         slog.err("createBuffer: {}", .{err});
         return err;
     };
     errdefer self.dev.destroyBuffer(buf, self.vk_alloc);
     const mreq = self.dev.getBufferMemoryRequirements(buf);
-    const mem = try self.dev.allocateMemory(&.{ .allocation_size = mreq.size, .memory_type_index = self.host_vis_mem_idx }, self.vk_alloc);
+    const memory = self.gpu_allocator.builtin;
+    const memory_type_index = memory.findMemoryType(
+        mreq.memory_type_bits,
+        .{ .host_visible_bit = true },
+        .{ .host_coherent_bit = true },
+    ) orelse return error.NoCompatibleMemoryType;
+    const mem = try self.dev.allocateMemory(&.{ .allocation_size = mreq.size, .memory_type_index = memory_type_index }, self.vk_alloc);
     errdefer self.dev.freeMemory(mem, self.vk_alloc);
     const mem_offset = 0;
     try self.dev.bindBufferMemory(buf, mem, mem_offset);
-    const data = @as([*]u8, @ptrCast((try self.dev.mapMemory(mem, mem_offset, vk.WHOLE_SIZE, .{})).?))[0..mreq.size];
+    const mapped = (try self.dev.mapMemory(mem, mem_offset, vk.WHOLE_SIZE, .{})) orelse return error.MapMemoryFailed;
+    const data = @as([*]u8, @ptrCast(mapped))[0..@intCast(mreq.size)];
     @memcpy(data[0..contents.len], contents);
     defer self.dev.unmapMemory(mem);
-    if (!self.host_vis_coherent)
+    if (!memory.properties.memory_types[memory_type_index].property_flags.host_coherent_bit)
         try self.dev.flushMappedMemoryRanges(&.{.{ .memory = mem, .offset = mem_offset, .size = mreq.size }});
     return .{ .buf = buf, .mem = mem };
 }
 
-pub fn beginSingleTimeCommands(self: *Self) !vk.CommandBuffer {
-    if (self.cpool_lock) |l| l.lockCB(l.lock_userdata);
-    defer if (self.cpool_lock) |l| l.unlockCB(l.lock_userdata);
-
-    var cmdbuf: vk.CommandBuffer = undefined;
-    self.dev.allocateCommandBuffers(&.{
-        .command_pool = self.cpool,
-        .level = .primary,
-        .command_buffer_count = 1,
-    }, @ptrCast(&cmdbuf)) catch |err| {
-        if (enable_breakpoints) @breakpoint();
-        return err;
-    };
-    try self.dev.beginCommandBuffer(cmdbuf, &.{
-        .flags = .{ .one_time_submit_bit = true },
-    });
-    return cmdbuf;
+fn destroyAllocatedBuffer(self: *Self, buffer: AllocatedBuffer) void {
+    if (buffer.custom_resource) |resource| {
+        const custom = self.gpu_allocator.custom;
+        custom.destroy_buffer(custom.userdata, self.dev, resource);
+    } else {
+        self.dev.destroyBuffer(buffer.buf, self.vk_alloc);
+        self.dev.freeMemory(buffer.mem, self.vk_alloc);
+    }
 }
 
-pub fn endSingleTimeCommands(self: *Self, cmdbuf: vk.CommandBuffer) !void {
-    try self.dev.endCommandBuffer(cmdbuf);
-    defer self.dev.freeCommandBuffers(self.cpool, &.{cmdbuf});
+fn destroyStreamBuffer(self: *Self, buffer: vk.Buffer, resource: ?BufferAllocation) void {
+    if (resource) |custom_resource| {
+        const custom = self.gpu_allocator.custom;
+        custom.destroy_buffer(custom.userdata, self.dev, custom_resource);
+    } else {
+        self.dev.destroyBuffer(buffer, self.vk_alloc);
+    }
+}
 
-    if (self.queue_lock) |l| l.lockCB(l.lock_userdata);
-    defer if (self.queue_lock) |l| l.unlockCB(l.lock_userdata);
-    const qs = [_]vk.SubmitInfo{.{
-        .wait_semaphore_count = 0,
-        .p_wait_semaphores = null,
-        .p_wait_dst_stage_mask = null,
-        .command_buffer_count = 1,
-        .p_command_buffers = @ptrCast(&cmdbuf),
-        .signal_semaphore_count = 0,
-        .p_signal_semaphores = null,
-    }};
+fn recordPendingUploads(self: *Self) !void {
+    if (self.pending_uploads.items.len == 0) return;
 
-    const fence = try self.dev.createFence(&.{}, self.vk_alloc);
-    defer self.dev.destroyFence(fence, self.vk_alloc);
-    try self.dev.queueSubmit(self.queue, &qs, fence);
-    if (try self.dev.waitForFences(&.{fence}, .true, std.math.maxInt(u64)) != .success) unreachable; // VK_TIMEOUT should be unlikely
+    const previous_target = self.active_render_target;
+    self.finishOffscreenTarget(false);
+
+    const frame = self.current_frame;
+    try frame.staging.ensureUnusedCapacity(self.allocator, self.pending_uploads.items.len);
+    frame.prepass_used = true;
+    const cmdbuf = frame.prepass_cmd;
+    const dev = self.dev;
+
+    for (self.pending_uploads.items) |upload| {
+        const to_transfer = vk.ImageMemoryBarrier{
+            .src_access_mask = .{},
+            .dst_access_mask = .{ .transfer_write_bit = true },
+            .old_layout = .undefined,
+            .new_layout = .transfer_dst_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = upload.image,
+            .subresource_range = colorSubresourceRange(),
+        };
+        dev.cmdPipelineBarrier(cmdbuf, .{ .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &.{to_transfer});
+
+        const copy = vk.BufferImageCopy{
+            .buffer_offset = 0,
+            .buffer_row_length = 0,
+            .buffer_image_height = 0,
+            .image_subresource = .{
+                .aspect_mask = .{ .color_bit = true },
+                .mip_level = 0,
+                .base_array_layer = 0,
+                .layer_count = 1,
+            },
+            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
+            .image_extent = .{ .width = upload.width, .height = upload.height, .depth = 1 },
+        };
+        dev.cmdCopyBufferToImage(cmdbuf, upload.staging.buf, upload.image, .transfer_dst_optimal, &.{copy});
+
+        const to_sampled = vk.ImageMemoryBarrier{
+            .src_access_mask = .{ .transfer_write_bit = true },
+            .dst_access_mask = .{ .shader_read_bit = true },
+            .old_layout = .transfer_dst_optimal,
+            .new_layout = .shader_read_only_optimal,
+            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
+            .image = upload.image,
+            .subresource_range = colorSubresourceRange(),
+        };
+        dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{to_sampled});
+        frame.staging.appendAssumeCapacity(upload.staging);
+    }
+    self.pending_uploads.clearRetainingCapacity();
+
+    if (previous_target) |target| self.beginOffscreenTarget(target.texture, target.extent, .load);
 }
 
 pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpolation: dvui.enums.TextureInterpolation) !Texture {
+    return self.createTextureWithSampler(img_info, 8 + @as(usize, @intFromEnum(interpolation)));
+}
+
+fn createTextureWithSampler(self: Backend, img_info: vk.ImageCreateInfo, sampler_slot: usize) !Texture {
     const dev = self.dev;
+    var img: vk.Image = .null_handle;
+    var mem: vk.DeviceMemory = .null_handle;
+    var custom_resource: ?ImageAllocation = null;
+    var allocation_size: vk.DeviceSize = 0;
+    switch (self.gpu_allocator) {
+        .builtin => {
+            img = try dev.createImage(&img_info, self.vk_alloc);
+            errdefer dev.destroyImage(img, self.vk_alloc);
+            const mreq = dev.getImageMemoryRequirements(img);
+            allocation_size = mreq.size;
+            const memory = self.gpu_allocator.builtin;
+            const memory_type_index = memory.findMemoryType(
+                mreq.memory_type_bits,
+                .{ .device_local_bit = true },
+                .{},
+            ) orelse memory.findMemoryType(mreq.memory_type_bits, .{}, .{ .device_local_bit = true }) orelse
+                return error.NoCompatibleMemoryType;
 
-    const img: vk.Image = try dev.createImage(&img_info, self.vk_alloc);
-    errdefer dev.destroyImage(img, self.vk_alloc);
-    const mreq = dev.getImageMemoryRequirements(img);
-
-    const mem = dev.allocateMemory(&.{
-        .allocation_size = mreq.size,
-        .memory_type_index = self.device_local_mem_idx,
-    }, self.vk_alloc) catch |err| {
-        slog.err("Failed to alloc texture mem: {}", .{err});
-        return err;
+            mem = dev.allocateMemory(&.{
+                .allocation_size = mreq.size,
+                .memory_type_index = memory_type_index,
+            }, self.vk_alloc) catch |err| {
+                slog.err("Failed to alloc texture mem: {}", .{err});
+                return err;
+            };
+            errdefer dev.freeMemory(mem, self.vk_alloc);
+            try dev.bindImageMemory(img, mem, 0);
+        },
+        .custom => |custom| {
+            const resource = try custom.create_image(custom.userdata, dev, &img_info, .device_local);
+            if (resource.handle == .null_handle) {
+                custom.destroy_image(custom.userdata, dev, resource);
+                return error.InvalidResourceAllocation;
+            }
+            custom_resource = resource;
+            img = resource.handle;
+            allocation_size = resource.size;
+            errdefer custom.destroy_image(custom.userdata, dev, resource);
+        },
+    }
+    errdefer if (custom_resource) |resource| {
+        const custom = self.gpu_allocator.custom;
+        custom.destroy_image(custom.userdata, dev, resource);
+    } else {
+        dev.destroyImage(img, self.vk_alloc);
+        dev.freeMemory(mem, self.vk_alloc);
     };
-    errdefer dev.freeMemory(mem, self.vk_alloc);
-    try dev.bindImageMemory(img, mem, 0);
 
     const srr = vk.ImageSubresourceRange{
         .aspect_mask = .{ .color_bit = true },
@@ -1178,7 +1689,7 @@ pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpo
         return err;
     };
     const dii = [1]vk.DescriptorImageInfo{.{
-        .sampler = self.samplers[@intFromEnum(interpolation)],
+        .sampler = self.samplers[sampler_slot],
         .image_view = img_view,
         .image_layout = .shader_read_only_optimal,
     }};
@@ -1194,12 +1705,22 @@ pub fn createTextureWithMem(self: Backend, img_info: vk.ImageCreateInfo, interpo
     }};
     dev.updateDescriptorSets(&write_dss, null);
 
-    return Texture{ .img = img, .img_view = img_view, .mem = mem, .dset = dset[0] };
+    return Texture{
+        .img = img,
+        .img_view = img_view,
+        .mem = mem,
+        .custom_resource = custom_resource,
+        .allocation_size = allocation_size,
+        .dset = dset[0],
+    };
 }
 
-pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !Texture {
-    //slog.debug("img {}x{}; req size {}", .{ width, height, mreq.size });
-    const tex = try self.createTextureWithMem(.{
+pub fn createAndUploadTexture(self: *Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !Texture {
+    return self.createAndUploadTextureWithSampler(pixels, width, height, 8 + @as(usize, @intFromEnum(interpolation)));
+}
+
+fn createAndUploadTextureWithSampler(self: *Backend, pixels: [*]const u8, width: u32, height: u32, sampler_slot: usize) !Texture {
+    var tex = try self.createTextureWithSampler(.{
         .image_type = .@"2d",
         .format = img_format,
         .extent = .{ .width = width, .height = height, .depth = 1 },
@@ -1213,79 +1734,42 @@ pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, h
         },
         .sharing_mode = .exclusive,
         .initial_layout = .undefined,
-    }, interpolation);
+    }, sampler_slot);
     errdefer tex.deinit(self);
-    const dev = self.dev;
 
-    // prep host side staging buffer for transfer
-    const mreq = dev.getImageMemoryRequirements(tex.img);
+    const pixel_count = try std.math.mul(usize, @as(usize, width), @as(usize, height));
+    const upload_size = try std.math.mul(usize, pixel_count, 4);
     const img_staging = try self.stageToBuffer(.{
         .flags = .{},
-        .size = mreq.size,
+        .size = upload_size,
         .usage = .{ .transfer_src_bit = true },
         .sharing_mode = .exclusive,
-    }, pixels[0 .. width * height * 4]);
-    defer dev.destroyBuffer(img_staging.buf, self.vk_alloc);
-    defer dev.freeMemory(img_staging.mem, self.vk_alloc);
+    }, pixels[0..upload_size]);
+    var staging_owned = true;
+    errdefer if (staging_owned) self.destroyAllocatedBuffer(img_staging);
 
-    const cmdbuf = try self.beginSingleTimeCommands();
-    errdefer dev.resetCommandBuffer(cmdbuf, .{});
-
-    const srr = vk.ImageSubresourceRange{
-        .aspect_mask = .{ .color_bit = true },
-        .base_mip_level = 0,
-        .level_count = 1,
-        .base_array_layer = 0,
-        .layer_count = 1,
-    };
-    { // prep image to receive
-        const img_barrier = vk.ImageMemoryBarrier{
-            .src_access_mask = .{},
-            .dst_access_mask = .{ .transfer_write_bit = true },
-            .old_layout = .undefined,
-            .new_layout = .transfer_dst_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = tex.img,
-            .subresource_range = srr,
-        };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .host_bit = true, .top_of_pipe_bit = true }, .{ .transfer_bit = true }, .{}, null, null, &.{img_barrier});
-    }
-    { // copy host staging -> device mem
-        const buff_img_copy = vk.BufferImageCopy{
-            .buffer_offset = 0,
-            .buffer_row_length = 0,
-            .buffer_image_height = 0,
-            .image_subresource = .{
-                .aspect_mask = .{ .color_bit = true },
-                .mip_level = 0,
-                .base_array_layer = 0,
-                .layer_count = 1,
-            },
-            .image_offset = .{ .x = 0, .y = 0, .z = 0 },
-            .image_extent = .{ .width = width, .height = height, .depth = 1 },
-        };
-        dev.cmdCopyBufferToImage(cmdbuf, img_staging.buf, tex.img, .transfer_dst_optimal, &.{buff_img_copy});
-    }
-    { // transition to read only optimal
-        const img_barrier = vk.ImageMemoryBarrier{
-            .src_access_mask = .{ .transfer_write_bit = true },
-            .dst_access_mask = .{ .shader_read_bit = true },
-            .old_layout = .transfer_dst_optimal,
-            .new_layout = .shader_read_only_optimal,
-            .src_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
-            .image = tex.img,
-            .subresource_range = srr,
-        };
-        dev.cmdPipelineBarrier(cmdbuf, .{ .transfer_bit = true }, .{ .fragment_shader_bit = true }, .{}, null, null, &.{img_barrier});
-    }
-
-    self.endSingleTimeCommands(cmdbuf) catch unreachable; // submits transfer, waits for it to finish
+    // When a frame is active, reserve before transferring staging ownership so
+    // recording the upload cannot fail halfway through this texture creation.
+    if (self.frame_active)
+        try self.current_frame.staging.ensureUnusedCapacity(self.allocator, self.pending_uploads.items.len + 1);
+    try self.pending_uploads.append(self.allocator, .{
+        .image = tex.img,
+        .width = width,
+        .height = height,
+        .staging = img_staging,
+    });
+    staging_owned = false;
+    tex.layout = .shader_read_only_optimal;
+    if (self.frame_active) self.recordPendingUploads() catch unreachable;
     return tex;
 }
 
-pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.RenderPass {
+/// Compatibility alias for the original misspelled public symbol.
+pub fn createAndUplaodTexture(self: *Backend, pixels: [*]const u8, width: u32, height: u32, interpolation: dvui.enums.TextureInterpolation) !Texture {
+    return self.createAndUploadTexture(pixels, width, height, interpolation);
+}
+
+pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format, load_op: vk.AttachmentLoadOp, vk_alloc: ?*vk.AllocationCallbacks) !vk.RenderPass {
     var subpasses: [1]vk.SubpassDescription = undefined;
     var color_attachments: [1]vk.AttachmentDescription = undefined;
 
@@ -1293,12 +1777,12 @@ pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.Render
         color_attachments[0] = vk.AttachmentDescription{
             .format = format, // swapchain / framebuffer image format
             .samples = .{ .@"1_bit" = true },
-            .load_op = .clear,
+            .load_op = load_op,
             .store_op = .store,
             .stencil_load_op = .dont_care,
             .stencil_store_op = .dont_care,
-            .initial_layout = .undefined,
-            .final_layout = .shader_read_only_optimal,
+            .initial_layout = .color_attachment_optimal,
+            .final_layout = .color_attachment_optimal,
         };
         const color_attachment_ref = vk.AttachmentReference{
             .attachment = 0,
@@ -1327,7 +1811,7 @@ pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.Render
             .src_stage_mask = .{ .color_attachment_output_bit = true },
             .dst_stage_mask = .{ .fragment_shader_bit = true },
             .src_access_mask = .{ .color_attachment_read_bit = true, .color_attachment_write_bit = true },
-            .dst_access_mask = .{},
+            .dst_access_mask = .{ .shader_read_bit = true },
             .dependency_flags = .{ .by_region_bit = true },
         },
     };
@@ -1337,9 +1821,9 @@ pub fn createOffscreenRenderPass(dev: DeviceProxy, format: vk.Format) !vk.Render
         .p_attachments = &color_attachments,
         .subpass_count = @intCast(subpasses.len),
         .p_subpasses = &subpasses,
-        .dependency_count = 0,
+        .dependency_count = deps.len,
         .p_dependencies = @ptrCast(&deps),
-    }, null);
+    }, vk_alloc);
 }
 
 pub const VertexBindings = struct {
@@ -1371,17 +1855,12 @@ pub const VertexBindings = struct {
     };
 };
 
-pub const tex_binding = 1; // shader binding slot must match shader
+pub const tex_binding = texture_descriptor_binding.binding; // shader binding slot must match shader
 
-const PushConstants = extern struct {
+pub const PushConstants = extern struct {
     view_scale: [2]f32,
     view_translate: [2]f32,
 };
-
-/// device memory min alignment
-/// we could query it at runtime, but this is reasonable safe number. We don't use this for anything critical.
-/// https://vulkan.gpuinfo.org/displaydevicelimit.php?name=minMemoryMapAlignment&platform=all
-const vk_alignment = if (builtin.target.os.tag.isDarwin()) 16384 else 4096;
 
 pub const GenericError = std.mem.Allocator.Error || error{BackendError};
 pub const TextureError = GenericError || error{ TextureCreate, TextureRead, TextureUpdate, NotImplemented };

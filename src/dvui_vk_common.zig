@@ -15,13 +15,21 @@ pub const VkContext = struct {
     graphics_queue: vk.QueueProxy,
     present_queue: vk.QueueProxy,
     cmd_pool: vk.CommandPool,
-    low_loader: ?low.vulkan.Loader = null,
+    low_loader: low.vulkan.Loader,
     low_instance: low.vulkan.Instance = undefined,
     low_device: low.vulkan.Device = undefined,
-    instance_wrapper: ?*vk.InstanceWrapper = null,
-    device_wrapper: ?*vk.DeviceWrapper = null,
-    owns_device: bool = true,
-    owns_instance: bool = true,
+    instance_ownership: InstanceOwnership,
+    device_ownership: DeviceOwnership,
+
+    const InstanceOwnership = union(enum) {
+        borrowed,
+        owned: *vk.InstanceWrapper,
+    };
+
+    const DeviceOwnership = union(enum) {
+        borrowed,
+        owned: *vk.DeviceWrapper,
+    };
 
     /// Binding-native physical-device information retained by the backend.
     /// It intentionally contains no allocator-owned selection state.
@@ -45,15 +53,25 @@ pub const VkContext = struct {
     };
 
     pub fn deinit(self: *@This(), alloc: std.mem.Allocator) void {
-        if (self.owns_device) self.device.deviceWaitIdle() catch {};
+        if (self.device_ownership == .owned) self.device.deviceWaitIdle() catch {};
         self.device.destroyCommandPool(self.cmd_pool, self.alloc);
-        // low's device helper currently creates the device without allocation
-        // callbacks, so destruction must use the same allocator contract.
-        if (self.owns_device) self.device.destroyDevice(null);
-        if (self.device_wrapper) |wrapper| alloc.destroy(wrapper);
-        if (self.owns_instance) self.instance.destroyInstance(self.alloc);
-        if (self.instance_wrapper) |wrapper| alloc.destroy(wrapper);
-        if (self.low_loader) |*loader| loader.deinit();
+        switch (self.device_ownership) {
+            .borrowed => {},
+            .owned => |wrapper| {
+                // low's device helper currently creates the device without
+                // allocation callbacks, so destruction must match it.
+                self.device.destroyDevice(null);
+                alloc.destroy(wrapper);
+            },
+        }
+        switch (self.instance_ownership) {
+            .borrowed => {},
+            .owned => |wrapper| {
+                self.instance.destroyInstance(self.alloc);
+                alloc.destroy(wrapper);
+            },
+        }
+        self.low_loader.deinit();
         self.* = undefined;
     }
 
@@ -160,7 +178,7 @@ pub const VkContext = struct {
             .instance = instance,
             .alloc = opt.vk_alloc,
             .device = device,
-            .device_wrapper = wrapper,
+            .device_ownership = .{ .owned = wrapper },
             .physical_device = physical_device,
             .graphics_queue = graphics_queue,
             .present_queue = present_queue,
@@ -168,7 +186,7 @@ pub const VkContext = struct {
             .low_loader = low_loader,
             .low_instance = low_instance,
             .low_device = device_resources.low_device,
-            .owns_instance = false,
+            .instance_ownership = .borrowed,
         };
     }
 
@@ -182,8 +200,7 @@ pub const VkContext = struct {
         errdefer instance.deinit(opt.vk_alloc);
 
         var context = try initDevice(allocator, instance.proxy, presentation, opt);
-        context.owns_instance = true;
-        context.instance_wrapper = instance.wrapper;
+        context.instance_ownership = .{ .owned = instance.wrapper };
         return context;
     }
 
@@ -210,8 +227,8 @@ pub const VkContext = struct {
             .low_loader = low_loader,
             .low_instance = low_instance,
             .low_device = low_device,
-            .owns_device = false,
-            .owns_instance = false,
+            .device_ownership = .borrowed,
+            .instance_ownership = .borrowed,
         };
     }
 };
@@ -239,9 +256,25 @@ pub const VkBackend = struct {
     pub fn deinit(self: *@This()) void {
         for (self.contexts.items) |ctx| ctx.deinit();
         self.contexts.deinit(self.gpa);
-        if (self.renderer) |*r| r.deinit(self.gpa);
+        if (self.renderer) |*r| r.deinit();
         self.contexts_pool.deinit(self.gpa);
         self.vkc.deinit(self.gpa);
+    }
+
+    /// Adapter used by `VkRenderer.SubmitPrepass`. The frame's normal queue
+    /// submission follows on the same queue, so its completion fence also covers
+    /// this earlier prepass submission.
+    pub fn submitRendererPrepass(userdata: ?*anyopaque, command_buffer: vk.CommandBuffer) anyerror!void {
+        const self: *VkBackend = @ptrCast(@alignCast(userdata.?));
+        try self.vkc.device.queueSubmit(self.vkc.graphics_queue.handle, &.{.{
+            .wait_semaphore_count = 0,
+            .p_wait_semaphores = null,
+            .p_wait_dst_stage_mask = null,
+            .command_buffer_count = 1,
+            .p_command_buffers = @ptrCast(&command_buffer),
+            .signal_semaphore_count = 0,
+            .p_signal_semaphores = null,
+        }}, .null_handle);
     }
 
     /// alloc context without init
@@ -308,7 +341,7 @@ pub const WindowContext = struct {
         dvui.labelNoFmt(@src(), "DVUI VK Backend stats", .{}, .{ .font = h1, .expand = .horizontal, .gravity_x = 0.5 });
         dvui.label(@src(), "draw_calls:  {}", .{stats.draw_calls}, .{ .expand = .horizontal });
 
-        const idx_max = self.backend.renderer.?.current_frame.idx_data.len / @sizeOf(VkRenderer.Indice);
+        const idx_max = self.backend.renderer.?.current_frame.idx_data.len / @sizeOf(VkRenderer.Index);
         dvui.label(@src(), "indices: {} / {}", .{ stats.indices, idx_max }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(stats.indices)) / @as(f32, @floatFromInt(idx_max));
 
@@ -334,7 +367,7 @@ pub const WindowContext = struct {
         const prealloc_mem = self.backend.renderer.?.host_vis_data.len;
         dvui.label(@src(), "total:  {Bi:.1}", .{prealloc_mem}, .{ .expand = .horizontal });
         const prealloc_mem_frame = prealloc_mem / self.backend.renderer.?.frames.len;
-        const prealloc_mem_frame_used = stats.indices * @sizeOf(VkRenderer.Indice) + stats.verts * @sizeOf(VkRenderer.Vertex);
+        const prealloc_mem_frame_used = stats.indices * @sizeOf(VkRenderer.Index) + stats.verts * @sizeOf(VkRenderer.Vertex);
         dvui.label(@src(), "current frame:  {Bi:.1} / {Bi:.1}", .{ prealloc_mem_frame_used, prealloc_mem_frame }, .{ .expand = .horizontal });
         prc = @as(f32, @floatFromInt(prealloc_mem_frame_used)) / @as(f32, @floatFromInt(prealloc_mem_frame));
         dvui.currentWindow().theme.highlight.fill = dvui.Color.fromHSLuv(@max(12, (1 - prc * prc) * 155), 99, 50, 100);
@@ -376,11 +409,12 @@ pub fn paint(app: dvui.App, app_state: *AppState, ctx: *WindowContext) !void {
             .clear_value = .{ .color = .{ .float_32 = .{ 0.1, 0.1, 0.1, 1 } } },
         }},
     });
-    b.renderer.?.beginFrame(command_buffer, extent);
+    try b.renderer.?.beginFrame(command_buffer, extent);
     const nstime = ctx.dvui_window.beginWait(ctx.dvui_interrupted);
     try ctx.dvui_window.begin(nstime);
     const res = try app.frameFn();
     const end_micros = try ctx.dvui_window.end(.{});
+    _ = try b.renderer.?.endFrame();
     if (res != .ok) ctx.received_close = true;
     cmd.endRendering();
     try frame.submitAndPresent(.{});
