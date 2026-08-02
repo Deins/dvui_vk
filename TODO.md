@@ -1,15 +1,41 @@
 # TODO
-## windows backend
 
-port covers the normal dvui/Vulkan path, but it does not preserve several Win32-specific capabilities from [dvui_vk_win32.zig](/home/dee/dev/dvui_vk/src/dvui_vk_win32.zig).
+## Windows backend
 
-- Custom Win32 integration is absent: registering/configuring window classes, supplying a custom `wndProc`, accessing `HWND`, and manually dispatching/handling `WM_*` messages. The low compatibility `win` only exposes event servicing.
-- Window-class options are unsupported: custom class cursor/icon(s), background brush, menu name, instance, and extra class/window bytes ([win32 backend lines 493–539](/home/dee/dev/dvui_vk/src/dvui_vk_win32.zig:493)).
-- Windows dark title-bar configuration via `DwmSetWindowAttribute` is not implemented by low ([line 587](/home/dee/dev/dvui_vk/src/dvui_vk_win32.zig:587)). Low’s color scheme is only the `COLORSCHEME` environment override.
-- Precise Win32 initial-window sizing/centering—DPI conversion, `AdjustWindowRectEx`, and `SetWindowPos`—is absent ([lines 593–621](/home/dee/dev/dvui_vk/src/dvui_vk_win32.zig:593)). Low creates at the default OS position and its Windows backend treats the requested size as the outer window size.
-- On Windows, low’s fullscreen is currently a no-op, and its `setResizable`, min-size, and max-size operations are also no-ops ([low Windows backend](/home/dee/dev/low/src/windows/backend.zig:194)).
-- Low’s Windows cursor implementation only toggles visibility; it does not actually install the requested cursor shape. So `setCursor` degrades versus the `LoadCursorW`/`SetClassLongPtrW` implementation ([win32 lines 309–345](/home/dee/dev/dvui_vk/src/dvui_vk_win32.zig:309)).
-- Some input fidelity is lower: no side-specific modifiers in the callback contract, no repeat-count expansion, and its Windows key map omits many keys that the Win32 backend maps (keypad keys, F13–F24, Pause/Print/Menu, NumLock/CapsLock, etc.).
-- Low clipboard is currently an in-process fallback, not the system clipboard. This is not a regression from this file—its Win32 clipboard functions are stubs—but it is not native Windows clipboard support.
+The normal DVUI/Vulkan path now uses `low`. The functionality needed by a
+regular desktop application is covered:
 
-Notably, `InitOptions.icon` appears unused in both implementations, and `textInputRect` was already a no-op in the Win32 file.
+- requested sizes are drawable-content sizes and are converted with the
+  window's DPI;
+- explicitly sized DVUI windows are centered by default, with configurable
+  platform/default placement;
+- fullscreen, maximize/restore, resizability, and min/max content sizes work;
+- all DVUI cursor shapes are installed, including wait/progress cursors;
+- the expanded key map, repeat counts, and side-specific modifiers reach DVUI;
+- Windows uses the system UTF-16 clipboard, with the in-process clipboard as a
+  fallback when the system clipboard is temporarily unavailable;
+- Wayland uses the standard data-device clipboard with UTF-8 MIME types, with
+  a warning when it must use the in-process UTF-8 fallback;
+- X11 uses the standard `CLIPBOARD` selection with UTF-8 and legacy Latin-1
+  interoperability, with the same warned in-process fallback;
+- the Windows theme preference comes from the user registry and the native
+  title bar follows dark/light setting changes.
+
+The `dvui_vk` app path also forwards visibility, vsync, min/max size, and
+`dvui.Window.InitOptions` instead of silently replacing them with defaults.
+
+### Deferred platform integration
+
+Custom Win32 integration remains intentionally out of scope for now:
+
+- custom window-class registration and class options (cursor/icons,
+  background brush, menu, module instance, extra bytes);
+- supplying or chaining a custom `wndProc` and manually dispatching `WM_*`
+  messages.
+
+Applications can still access the backend-neutral native handle through
+`low.Window.nativeSurface()` when a narrowly scoped platform call is needed.
+
+`InitOptions.icon` is still unused, as it was in the removed Win32 backend.
+Native IME candidate placement is also still pending; `textInputRect` was
+already a no-op in that backend.

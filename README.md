@@ -2,33 +2,29 @@
 [![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 
 This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.2` and newer, and `zig v0.16` (see tags for older)
+Targeting `vulkan 1.3` and newer, and `zig v0.16` (see tags for older)
 
 ![screenshot](examples/3d/screenshot.png)
 
 ### Current platform support
 
-* **Windows** and **Linux** native
-    * **Windows** native Win32
-    * **Linux** native via `low` (X11/Wayland on Linux)
+* **Windows** and **Linux** through the cross-platform [`low`](https://github.com/Deins/low) platform layer.
+  Linux builds support X11 and Wayland.
 
-Backend is separated in parts:
-* [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - implements platform independent renderer, suitable for already existing vulkan apps or apps that want to do their own windowing, input etc. Only dependency: [vulkan_zig](https://github.com/Snektron/vulkan-zig)
-* DVUI backend implementations, has additional dependencies (see build.zig.zon):
-    * [dvui_vk_low.zig](./src/dvui_vk_low.zig) - backend powered by `low` for cross-platform Vulkan windowing and input.
-    * [dvui_vk_win32.zig](./src/dvui_vk_win32.zig) - backend based on native win32 api for windowing and input. (Windows only)
-    * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - additional common stuff used by all backends.
+The backend is split into these parts:
+* [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - platform-independent Vulkan rendering for applications that provide their own windowing and input.
+* [dvui_vk_low.zig](./src/dvui_vk_low.zig) - the main DVUI backend, using `low` for cross-platform windowing, input, and Vulkan presentation.
+* [dvui_vk_common.zig](./src/dvui_vk_common.zig) - shared Vulkan context and rendering helpers used by the `low` backend.
 
 ### todo, known issues
 * Rendering:
     * textureRead() not implemented
     * option to pass in general purpose gpu memory allocator for textures
     * linear color space frame-buffers. (easily switchable with source modifications, but tricky to expose).
-* App/Platform functionality:
+* Platform functionality:
     * should try to get free-type running for dvui text rendering instead of default stb-truetype. As text rendering quality is not as good. 
     * Touch events
-    * for windows native backend:
-        * Sleep when inactive is not implemented.
+    * Some platform-specific functionality is still incomplete; see [TODO.md](./TODO.md).
 
 ## Build & Run
 ```sh
@@ -38,7 +34,7 @@ Vulkan SDK is optional but recommended for development (to be able to run vulkan
 
 Shaders when modified need be recompiled by adding `-Dslangc` to build command. ([slangc](https://github.com/shader-slang/slang/releases) comes packaged with vulkan SDK or needs to be installed separately).
 
-### Standalone with vulkan 3D rendering
+### Standalone with Vulkan 3D rendering
 `zig build run --build-file ./examples/3d/build.zig`
 Or alternatively `cd examples/3d` and `zig build run`
 

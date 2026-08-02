@@ -6,24 +6,17 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui?ref=main#4eb795171d645f0747f14cb3c53bfc794199b685",
-            .hash = "dvui-0.5.0-dev-AQFJmaR7-gD8qpvUvxB3p9S6dtKSymehvDtZYKCaE20r",
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#7426b65eb38261f0bbb8820cbbc50947f6aba7bf",
+            .hash = "dvui-0.5.0-dev-AQFJmaJd_QARcAWztcpSHr9GX9MoAibD6tK_3_pXZP4Q",
         },
-
         .vulkan = .{
             //.path = "vulkan-zig",
             .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
             .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
         },
-        // required for windows
-        .win32 = .{
-            .url = "git+https://github.com/kristoff-it/zigwin32.git?ref=fix/zig16#1102e9b82e8bd50913b6a78035bfb399ebd8cf97",
-            .hash = "zigwin32-25.0.28-preview-6BfVhYKN5AOvXPVJq4bGZ7C5dM3PbUra4xhKAKOFJGcF",
-            .lazy = true,
-        },
         .low = .{
-            .url = "git+https://github.com/Deins/low#ebe6cd8177cf73aa85e5c3c19a6fe59c00973df6",
-            .hash = "low-0.1.0-d-W1KYRVDwDNNQ4oT029Cwr2smzklr_i_rZDKefN_Ghj",
+            .url = "git+https://github.com/Deins/low#7561e9098dca75cb6fbbd6fdd7c6d89534866d15",
+            .hash = "low-0.1.0-d-W1KZ7EEAB21UenulPoecj4LRbCmlEgDL_uZ7KHbBw_",
         },
 
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args

@@ -95,15 +95,6 @@ pub fn build(b: *Build) !void {
     dvui_vk_backend.addImport("low", low.module("low"));
     dvui_vk_backend.addImport("vk", vkzig_bindings);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
-    if (target.result.os.tag == .windows) {
-        // const dvui_win = b.createModule(.{ .target = target, .optimize = optimize, .root_source_file = dvui_dep.path("src/backends/dx11.zig") });
-        if (b.lazyDependency("win32", .{})) |zigwin32| {
-            // dvui_win.addImport("win32", zigwin32.module("win32"));
-            dvui_vk_backend.addImport("win32", zigwin32.module("win32"));
-        }
-        // dvui_win.addImport("dvui", dvui_module);
-        // dvui_vk_backend.addImport("dvui_win", dvui_win);
-    }
     if (ztracy) |zt| {
         dvui_vk_backend.addImport("ztracy", zt.module("root"));
         dvui_vk_backend.linkLibrary(zt.artifact("tracy"));

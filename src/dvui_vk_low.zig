@@ -1,8 +1,8 @@
+/// Backend based on `low` windowing library
 const std = @import("std");
 const builtin = @import("builtin");
 pub const dvui = @import("dvui");
 pub const low = @import("low");
-pub const win32 = if (builtin.target.os.tag == .windows) @import("win32").everything else void;
 pub const kind: dvui.enums.Backend = .custom;
 const slog = std.log.scoped(.dvu_vk_low);
 const Targets = low.vulkan.targets();
@@ -14,10 +14,21 @@ pub const VkRenderer = @import("dvui_vk_renderer.zig");
 
 pub const InitOptions = struct {
     dvui_gpa: std.mem.Allocator,
+    dvui_window_init_options: dvui.Window.InitOptions = .{},
     /// The allocator used for temporary allocations used during init()
     gpa: std.mem.Allocator,
     /// The initial size of the application window
     size: ?dvui.Size = null,
+    /// Optional minimum drawable-content size.
+    min_size: ?dvui.Size = null,
+    /// Optional maximum drawable-content size.
+    max_size: ?dvui.Size = null,
+    resizable: bool = true,
+    decorated: bool = true,
+    visible: bool = true,
+    /// `null` preserves the former behavior: explicitly sized windows are
+    /// centered, while default-sized windows use platform placement.
+    placement: ?WindowPlacement = null,
 
     /// The application title to display
     title: [:0]const u8,
@@ -63,6 +74,7 @@ pub const vk = @import("vk");
 pub const dvui_vk_common = @import("dvui_vk_common.zig");
 pub const DecorationMode = low.DecorationMode;
 pub const WindowState = low.WindowState;
+pub const WindowPlacement = enum { default, centered };
 pub const VkContext = dvui_vk_common.VkContext;
 pub const ExternalDevice = VkContext.ExternalDevice;
 pub const VkBackend = dvui_vk_common.VkBackend;
@@ -374,7 +386,8 @@ fn cursorShape(cursor: dvui.enums.Cursor) low.CursorShape {
         .crosshair => .crosshair,
         .hand => .hand,
         .ibeam => .ibeam,
-        .wait, .wait_arrow => .arrow,
+        .wait => std.meta.stringToEnum(low.CursorShape, "wait") orelse .arrow,
+        .wait_arrow => std.meta.stringToEnum(low.CursorShape, "progress") orelse .arrow,
         .hidden => .hidden,
     };
 }
@@ -485,11 +498,28 @@ pub fn ScrollCB(window: *low.Window, xoffset: f64, yoffset: f64) void {
 
 fn lowModDvui(mods: low.Modifiers) dvui.enums.Mod {
     var mod = dvui.enums.Mod.none;
-    if (mods.shift) mod.combine(.lshift);
-    if (mods.control) mod.combine(.lcontrol);
-    if (mods.alt) mod.combine(.lalt);
-    if (mods.super) mod.combine(.lcommand);
+    const left_shift = lowModifierSide(mods, "left_shift");
+    const right_shift = lowModifierSide(mods, "right_shift");
+    const left_control = lowModifierSide(mods, "left_control");
+    const right_control = lowModifierSide(mods, "right_control");
+    const left_alt = lowModifierSide(mods, "left_alt");
+    const right_alt = lowModifierSide(mods, "right_alt");
+    const left_super = lowModifierSide(mods, "left_super");
+    const right_super = lowModifierSide(mods, "right_super");
+    if (left_shift or (mods.shift and !left_shift and !right_shift)) mod.combine(.lshift);
+    if (right_shift) mod.combine(.rshift);
+    if (left_control or (mods.control and !left_control and !right_control)) mod.combine(.lcontrol);
+    if (right_control) mod.combine(.rcontrol);
+    if (left_alt or (mods.alt and !left_alt and !right_alt)) mod.combine(.lalt);
+    if (right_alt) mod.combine(.ralt);
+    if (left_super or (mods.super and !left_super and !right_super)) mod.combine(.lcommand);
+    if (right_super) mod.combine(.rcommand);
     return mod;
+}
+
+fn lowModifierSide(mods: low.Modifiers, comptime field: []const u8) bool {
+    if (comptime @hasField(low.Modifiers, field)) return @field(mods, field);
+    return false;
 }
 
 pub fn MouseButtonCB(window: *low.Window, button: low.MouseButton, action: low.Action, mods: low.Modifiers) void {
@@ -613,16 +643,23 @@ pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !I
     const low_ctx = try ensureLowContext(gpa, init_opts);
     low_ctx_acquired = true;
 
-    const created_window = try low_ctx.createWindow(.{
+    var window_options: low.WindowOptions = .{
         .title = init_opts.title,
         .size = if (init_opts.size) |size| lowWindowSizeFromDvui(size) else .{ .width = 1280, .height = 720 },
+        .min_size = if (init_opts.min_size) |size| lowWindowSizeFromDvui(size) else null,
+        .max_size = if (init_opts.max_size) |size| lowWindowSizeFromDvui(size) else null,
         .app_id = null,
-        .resizable = true,
-        .decorated = true,
+        .resizable = init_opts.resizable,
+        .decorated = init_opts.decorated,
         .titlebar = init_opts.titlebar,
         .state = init_opts.window_state,
-        .visible = true,
-    });
+        .visible = init_opts.visible,
+    };
+    if (comptime @hasField(low.WindowOptions, "placement")) {
+        const placement = init_opts.placement orelse if (init_opts.size != null) WindowPlacement.centered else .default;
+        window_options.placement = @enumFromInt(@intFromEnum(placement));
+    }
+    const created_window = try low_ctx.createWindow(window_options);
     window = created_window;
     created_window.setUserData(window_context);
     registerDvuiIO(created_window);
@@ -639,7 +676,7 @@ pub fn initWindow(loader: ?vk.PfnGetInstanceProcAddr, init_opts: InitOptions) !I
         .last_cursor_y = created_window.getCursorPos().y,
     };
 
-    window_context.dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), .{});
+    window_context.dvui_window = try dvui.Window.init(@src(), gpa, dvuiBackend(window_context), init_opts.dvui_window_init_options);
     dvui_window_init = true;
     try registerWindowContext(window_context, gpa);
 
@@ -682,10 +719,14 @@ pub fn main() !void {
         .title = init_opts.title,
         .icon = init_opts.icon,
         .size = init_opts.size,
+        .min_size = init_opts.min_size,
+        .max_size = init_opts.max_size,
+        .visible = !init_opts.hidden,
+        .dvui_window_init_options = init_opts.window_init_options,
         .max_frames_in_flight = max_frames_in_flight,
         .dvui_gpa = gpa,
         .gpa = gpa,
-        .vsync = true,
+        .vsync = init_opts.vsync,
     });
     defer iw.deinit();
     const b = iw.backend;
@@ -696,11 +737,6 @@ pub fn main() !void {
     g_app_state = .{
         .backend = b,
     };
-
-    if (app.initFn) |initFn| {
-        try initFn(&b.contexts.items[0].dvui_window);
-    }
-    defer if (app.deinitFn) |deinitFn| deinitFn();
 
     b.renderer = try VkRenderer.init(b.gpa, .{
         .dev = b.vkc.device,
@@ -718,9 +754,17 @@ pub fn main() !void {
         .max_frames_in_flight = max_frames_in_flight,
     });
 
+    const app_window = &iw.window.dvui_window;
+    if (app.initFn) |initFn| {
+        try app_window.begin(app_window.frame_time_ns);
+        try initFn(app_window);
+        _ = try app_window.end(.{});
+    }
+    defer if (app.deinitFn) |deinitFn| deinitFn(app_window);
+
     defer b.vkc.device.queueWaitIdle(b.vkc.graphics_queue.handle) catch {};
 
-    while (b.contexts.items.len > 0) {
+    main_loop: while (b.contexts.items.len > 0) {
         lowContext().pollEvents();
         var i: usize = 0;
         while (i < b.contexts.items.len) {
@@ -729,6 +773,7 @@ pub fn main() !void {
             try paint(app, &g_app_state, ctx);
             b.prev_frame_stats = b.renderer.?.stats;
             if (ctx.received_close) {
+                if (ctx == iw.window) break :main_loop;
                 b.destroyContext(ctx);
                 continue;
             }
