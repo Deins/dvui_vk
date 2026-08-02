@@ -18,6 +18,10 @@
             .url = "git+https://github.com/Deins/low#7561e9098dca75cb6fbbd6fdd7c6d89534866d15",
             .hash = "low-0.1.0-d-W1KZ7EEAB21UenulPoecj4LRbCmlEgDL_uZ7KHbBw_",
         },
+        .wio = .{
+            .url = "git+https://github.com/ypsvlq/wio#c7a0b1ec889c8c17841ffb04ae3d31810328cc64",
+            .hash = "wio-0.0.0-8xHrr_kECABNBaGmnTW2ymwtaa-Oqg3CWN_tXK6KGFkZ",
+        },
 
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{

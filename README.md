@@ -9,12 +9,14 @@ Targeting `vulkan 1.3` and newer, and `zig v0.16` (see tags for older)
 ### Current platform support
 
 * **Windows** and **Linux** through the cross-platform [`low`](https://github.com/Deins/low) platform layer.
+* An alternative [`wio`](https://github.com/ypsvlq/wio)-based Vulkan window/input backend, selected with `-Dwindow_backend=wio`.
   Linux builds support X11 and Wayland.
 
 The backend is split into these parts:
 * [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - platform-independent Vulkan rendering for applications that provide their own windowing and input.
 * [dvui_vk_low.zig](./src/dvui_vk_low.zig) - the main DVUI backend, using `low` for cross-platform windowing, input, and Vulkan presentation.
 * [dvui_vk_common.zig](./src/dvui_vk_common.zig) - shared Vulkan context and rendering helpers used by the `low` backend.
+* [dvui_vk_wio.zig](./src/dvui_vk_wio.zig) - the alternative `wio` window/input backend with its own Vulkan surface and swapchain bridge.
 
 ### todo, known issues
 * Rendering:

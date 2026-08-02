@@ -190,6 +190,102 @@ pub const VkContext = struct {
         };
     }
 
+    /// Creates a device after a platform-neutral Vulkan surface has been
+    /// created.  This is used by window libraries such as wio which expose a
+    /// surface directly, rather than exposing the native display handles that
+    /// low uses for pre-surface presentation probing.
+    pub fn initDeviceForSurface(
+        allocator: std.mem.Allocator,
+        instance: vk.InstanceProxy,
+        surface: vk.SurfaceKHR,
+        opt: Options,
+    ) !VkContext {
+        var low_loader = try low.vulkan.Loader.init();
+        errdefer low_loader.deinit();
+        const low_instance = try low_loader.loadInstanceApi(low.vulkan.toInstance(instance.handle));
+        const physical_devices = try instance.enumeratePhysicalDevicesAlloc(allocator);
+        defer allocator.free(physical_devices);
+
+        var selection: ?Targets.DeviceSelection(vk) = null;
+        for (physical_devices) |physical_device| {
+            const properties = instance.getPhysicalDeviceProperties(physical_device);
+            if (vk.Version.toU32(@as(vk.Version, @bitCast(properties.api_version))) < vk.Version.toU32(opt.required_api_version)) continue;
+
+            const extensions = try instance.enumerateDeviceExtensionPropertiesAlloc(physical_device, null, allocator);
+            defer allocator.free(extensions);
+            var has_all_extensions = true;
+            for (opt.device_extensions) |required| {
+                var found = false;
+                for (extensions) |available| {
+                    if (std.mem.eql(u8, std.mem.sliceTo(&available.extension_name, 0), std.mem.span(required))) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    has_all_extensions = false;
+                    break;
+                }
+            }
+            if (!has_all_extensions) continue;
+
+            const families = try instance.getPhysicalDeviceQueueFamilyPropertiesAlloc(physical_device, allocator);
+            defer allocator.free(families);
+            var graphics_family: ?u32 = null;
+            var present_family: ?u32 = null;
+            for (families, 0..) |family, index| {
+                const family_index: u32 = @intCast(index);
+                if (graphics_family == null and family.queue_flags.graphics_bit) graphics_family = family_index;
+                if (present_family == null and try instance.getPhysicalDeviceSurfaceSupportKHR(physical_device, family_index, surface) == .true) present_family = family_index;
+            }
+            if (graphics_family == null or present_family == null) continue;
+            selection = .{
+                .physical_device = physical_device,
+                .requirements = .{
+                    .required_api_version = opt.required_api_version,
+                    .required_extensions = opt.device_extensions,
+                    .required_features = opt.required_features,
+                    .required_features_13 = opt.required_features_13,
+                    .extra_features = opt.device_create_info_p_next,
+                },
+                .graphics_queue_family = graphics_family.?,
+                .present_queue_family = present_family.?,
+            };
+            break;
+        }
+        const selected = selection orelse return error.NoSuitableDevice;
+        var device_resources = try Targets.createDevice(vk, allocator, instance, &low_instance, selected);
+        errdefer device_resources.deinit();
+        const physical_device = PhysicalDevice{
+            .handle = selected.physical_device,
+            .properties = instance.getPhysicalDeviceProperties(selected.physical_device),
+            .memory_properties = instance.getPhysicalDeviceMemoryProperties(selected.physical_device),
+            .graphics_queue_index = selected.graphics_queue_family,
+            .present_queue_index = selected.present_queue_family,
+        };
+        const device = device_resources.device;
+        const graphics_queue = vk.QueueProxy.init(device_resources.graphics_queue, device.wrapper);
+        const present_queue = vk.QueueProxy.init(device_resources.present_queue, device.wrapper);
+        const cmd_pool = try device.createCommandPool(&.{
+            .flags = .{ .reset_command_buffer_bit = true },
+            .queue_family_index = selected.graphics_queue_family,
+        }, opt.vk_alloc);
+        return .{
+            .instance = instance,
+            .alloc = opt.vk_alloc,
+            .device = device,
+            .device_ownership = .{ .owned = device_resources.wrapper },
+            .physical_device = physical_device,
+            .graphics_queue = graphics_queue,
+            .present_queue = present_queue,
+            .cmd_pool = cmd_pool,
+            .low_loader = low_loader,
+            .low_instance = low_instance,
+            .low_device = device_resources.low_device,
+            .instance_ownership = .borrowed,
+        };
+    }
+
     pub fn init(
         allocator: std.mem.Allocator,
         loader: anytype,
