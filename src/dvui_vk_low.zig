@@ -267,16 +267,11 @@ pub fn windowSize(context_handle: ContextHandle) dvui.Size.Natural {
     return context_handle.get().last_window_size;
 }
 
-/// Return the detected additional scaling.  This represents the user's
-/// additional display scaling (usually set in their window system's
-/// settings).  Currently only called during `dvui.Window.init`, so currently
-/// this sets the initial content scale.
-pub fn contentScale(self: ContextHandle) f32 {
-    const ctx = get(self);
-    if (ctx.low_window) |ptr| {
-        const low_win: *low.Window = @ptrCast(@alignCast(ptr));
-        return low_win.getContentScale().x;
-    }
+/// `low`'s content scale is already represented by the ratio between its
+/// logical window size and physical framebuffer size. DVUI derives that pixel
+/// scale independently, so reporting it here as an additional content scale
+/// would apply the system DPI twice.
+pub fn contentScale(_: ContextHandle) f32 {
     return 1.0;
 }
 
@@ -583,16 +578,15 @@ fn syncWindowState(ctx: *WindowContext) void {
         ctx.last_pixel_size = pixel_size;
     }
 
-    ctx.dvui_window.content_scale = window.getContentScale().x;
-
     const cursor_pos = window.getCursorPos();
     if (cursor_pos.x != ctx.last_cursor_x or cursor_pos.y != ctx.last_cursor_y) {
         ctx.last_cursor_x = cursor_pos.x;
         ctx.last_cursor_y = cursor_pos.y;
+        const pixel_pos = window.contentToPixelOffset(cursor_pos);
         _ = ctx.dvui_window.addEventMouseMotion(.{
             .pt = .{
-                .x = @floatCast(cursor_pos.x),
-                .y = @floatCast(cursor_pos.y),
+                .x = @floatCast(pixel_pos.x),
+                .y = @floatCast(pixel_pos.y),
             },
         }) catch unreachable;
     }
