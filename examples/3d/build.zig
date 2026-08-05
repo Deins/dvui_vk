@@ -32,7 +32,13 @@ pub fn build(b: *Build) !void {
         .registry = vk_registry,
     });
 
-    const dvui_dep = dvui_vk_dep.builder.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom, .@"tree-sitter" = false });
+    const dvui_dep = dvui_vk_dep.builder.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .custom,
+        .renderer = .vulkan,
+        .@"tree-sitter" = false,
+    });
     const dvui_module = dvui_dep.module("dvui");
 
     //
@@ -83,9 +89,9 @@ fn patchedGlibcLibcFile(b: *Build) ?Build.LazyPath {
 
     const patch = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt(
         "CRT1=$(cc -print-file-name=crt1.o 2>/dev/null || echo /usr/lib/crt1.o) && " ++
-        "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
-        "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
-        "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
+            "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
+            "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
+            "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
         .{patch_dir},
     ) });
 

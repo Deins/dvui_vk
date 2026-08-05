@@ -7,12 +7,9 @@ const TracyMode = enum {
     on_demand, // starts profiling only once tracy connects
 };
 
-const WindowBackend = enum { low, wio };
-
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const window_backend = b.option(WindowBackend, "window_backend", "Window backend: low or wio") orelse .low;
     const options = .{
         .ztracy = b.option(
             TracyMode,
@@ -25,8 +22,6 @@ pub fn build(b: *Build) !void {
             "Enable Tracy fiber support",
         ) orelse false,
     };
-    var link_shaders_to = std.ArrayList(*std.Build.Step.Compile).initCapacity(b.allocator, 16) catch unreachable;
-
     // Vulkan
     const vk_registry_opt = b.option([]const u8, "vk_registry", "Path to vulkan registry vk.xml");
     const vk_registry: Build.LazyPath = if (vk_registry_opt) |ps| Build.LazyPath{ .cwd_relative = ps } else blk: {
@@ -58,13 +53,6 @@ pub fn build(b: *Build) !void {
         .vk_extras = true,
     });
 
-    const wio = if (window_backend == .wio) b.dependency("wio", .{
-        .target = target,
-        .optimize = optimize,
-        .enable_vulkan = true,
-        .unix_backends = if (low_x11 and low_wayland) "x11,wayland" else if (low_x11) "x11" else if (low_wayland) "wayland" else "",
-    }) else null;
-
     // ZTracy
     const ztracy =
         if (options.ztracy != .off)
@@ -80,8 +68,15 @@ pub fn build(b: *Build) !void {
 
     // DVUI
     const dvui = @import("dvui");
-    const dvui_dep = b.dependency("dvui", .{ .target = target, .optimize = optimize, .backend = .custom, .@"tree-sitter" = false });
+    const dvui_dep = b.dependency("dvui", .{
+        .target = target,
+        .optimize = optimize,
+        .backend = .custom,
+        .renderer = .vulkan,
+        .@"tree-sitter" = false,
+    });
     const dvui_module = dvui_dep.module("dvui");
+    const dvui_vulkan_renderer = dvui_dep.module("dvui_vulkan_renderer");
     const stb_source = "vendor/stb/";
     // dvui deps
     dvui_module.link_libc = true;
@@ -100,11 +95,11 @@ pub fn build(b: *Build) !void {
     const dvui_vk_backend = b.addModule("dvui_vk_backend", .{
         .target = target,
         .optimize = optimize,
-        .root_source_file = b.path(if (window_backend == .wio) "src/dvui_vk_wio.zig" else "src/dvui_vk_low.zig"),
+        .root_source_file = b.path("src/dvui_vk_low.zig"),
     });
     dvui_vk_backend.addImport("low", low.module("low"));
     dvui_vk_backend.addImport("vk", vkzig_bindings);
-    if (wio) |dep| dvui_vk_backend.addImport("wio", dep.module("wio"));
+    dvui_vk_backend.addImport("dvui_vulkan_renderer", dvui_vulkan_renderer);
     dvui.linkBackend(dvui_module, dvui_vk_backend);
     if (ztracy) |zt| {
         dvui_vk_backend.addImport("ztracy", zt.module("root"));
@@ -130,60 +125,34 @@ pub fn build(b: *Build) !void {
         exe.root_module.addImport("dvui", dvui_module);
         exe.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
-            // wio embeds its own, more complete application manifest via
-            // win32.rc. Linking DVUI's manifest as well creates duplicate
-            // RT_MANIFEST resource ID 1.
-            if (window_backend == .low) exe.win32_manifest = dvui_dep.path("./src/main.manifest");
+            exe.win32_manifest = dvui_dep.path("./src/main.manifest");
             exe.subsystem = .Windows;
         }
         b.installArtifact(exe);
         b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
-        if (window_backend == .wio) {
-            b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe).step);
-        }
-        link_shaders_to.append(b.allocator, exe) catch unreachable;
     }
 
-    if (window_backend == .low) {
-        {
-            const exe_standalone_mod = b.addModule("standalone_mod", .{
-                .root_source_file = b.path("examples/standalone.zig"),
-                .target = target,
-                .optimize = optimize,
-            });
-            const exe_standalone = b.addExecutable(.{
-                .name = "standalone_demo",
-                .root_module = exe_standalone_mod,
-            });
-            if (target.query.isNative() and target.result.os.tag == .linux and target.result.abi == .gnu) {
-                if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
-            }
-            exe_standalone.root_module.addImport("dvui", dvui_module);
-            exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
-            if (target.result.os.tag == .windows) {
-                exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
-                exe_standalone.subsystem = .Windows;
-            }
-            b.installArtifact(exe_standalone);
-            b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
-            link_shaders_to.append(b.allocator, exe_standalone) catch unreachable;
+    {
+        const exe_standalone_mod = b.addModule("standalone_mod", .{
+            .root_source_file = b.path("examples/standalone.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        const exe_standalone = b.addExecutable(.{
+            .name = "standalone_demo",
+            .root_module = exe_standalone_mod,
+        });
+        if (target.query.isNative() and target.result.os.tag == .linux and target.result.abi == .gnu) {
+            if (patchedGlibcLibcFile(b)) |lf| exe_standalone.setLibCFile(lf);
         }
-    }
-
-    { // Shaders
-        const glslc = b.option(bool, "glslc", "Compile glsl shaders") orelse false;
-        const slangc = b.option(bool, "slangc", "Compile slang shaders") orelse false;
-        const shaders = compileShaders(b, "src", .{ .slang = if (slangc) .{} else null, .glsl = glslc, .optimize = optimize != .Debug });
-
-        // add shader modules
-        for (shaders.items) |shader| {
-            for (link_shaders_to.items) |mod| mod.root_module.addAnonymousImport(shader.name, .{
-                .root_source_file = shader.path,
-            });
-            if (shader.step) |step| {
-                for (link_shaders_to.items) |mod| mod.step.dependOn(step);
-            }
+        exe_standalone.root_module.addImport("dvui", dvui_module);
+        exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
+        if (target.result.os.tag == .windows) {
+            exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
+            exe_standalone.subsystem = .Windows;
         }
+        b.installArtifact(exe_standalone);
+        b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
     }
 }
 

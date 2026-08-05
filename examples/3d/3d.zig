@@ -444,10 +444,6 @@ pub fn main() !void {
     g_scene = try Scene.init(gpa, vkc, io);
     defer g_scene.deinit(gpa);
 
-    // hijack the dvui pipeline, so that it accepts depth buffer
-    g_app_state.device().destroyPipeline(g_app_state.backend.renderer.?.pipeline, g_app_state.backend.renderer.?.vk_alloc);
-    g_app_state.backend.renderer.?.pipeline = try createDvuiPipeline(g_app_state.device(), g_app_state.backend.renderer.?.pipeline_layout, g_app_state.render_pass, g_app_state.backend.renderer.?.vk_alloc);
-
     defer g_app_state.backend.vkc.device.queueWaitIdle(g_app_state.backend.vkc.graphics_queue.handle) catch {}; // let gpu finish its work on exit, otherwise we will get validation errors
 
     if (@hasDecl(DvuiVkBackend, "windowDamageRefreshCallback")) {
@@ -461,7 +457,7 @@ pub fn main() !void {
                 while (context_index < g_app_state.backend.contexts.items.len) {
                     const ctx = g_app_state.backend.contexts.items[context_index];
                     try paint(&g_app_state, ctx);
-                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
+                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.statsSnapshot();
                     if (ctx.received_close) {
                         g_app_state.backend.destroyContext(ctx);
                         continue;
@@ -592,50 +588,6 @@ pub fn paint(app_state: *AppState, ctx: *DvuiVkBackend.WindowContext) !void {
         const wait_event_micros = ctx.dvui_window.waitTime(end_micros);
         ctx.dvui_interrupted = try dvui.backend.waitEventTimeout(@ptrCast(ctx), wait_event_micros);
     } else ctx.dvui_interrupted = true;
-}
-
-fn createDvuiPipeline(
-    dev: vk.DeviceProxy,
-    layout: vk.PipelineLayout,
-    render_pass: vk.RenderPass,
-    vk_alloc: ?*vk.AllocationCallbacks,
-) vk.DeviceProxy.CreateGraphicsPipelinesError!vk.Pipeline {
-    //  NOTE: VK_KHR_maintenance5 (which was promoted to vulkan 1.4) deprecates ShaderModules.
-    // todo: check for extension and then enable
-    const ext_m5 = false; // VK_KHR_maintenance5
-    const vert_shdd = vk.ShaderModuleCreateInfo{
-        .code_size = DvuiVkBackend.VkRenderer.vs_spv.len,
-        .p_code = @ptrCast(&DvuiVkBackend.VkRenderer.vs_spv),
-    };
-    const frag_shdd = vk.ShaderModuleCreateInfo{
-        .code_size = DvuiVkBackend.VkRenderer.fs_spv.len,
-        .p_code = @ptrCast(&DvuiVkBackend.VkRenderer.fs_spv),
-    };
-    const pssci = [_]vk.PipelineShaderStageCreateInfo{
-        .{
-            .stage = .{ .vertex_bit = true },
-            .p_name = "main",
-            .module = if (ext_m5) null else try dev.createShaderModule(&vert_shdd, vk_alloc),
-            .p_next = if (ext_m5) &vert_shdd else null,
-        },
-        .{
-            .stage = .{ .fragment_bit = true },
-            //.module = frag,
-            .p_name = "main",
-            .module = if (ext_m5) null else try dev.createShaderModule(&frag_shdd, vk_alloc),
-            .p_next = if (ext_m5) &frag_shdd else null,
-        },
-    };
-    defer if (!ext_m5) for (pssci) |p| if (p.module != .null_handle) dev.destroyShaderModule(p.module, vk_alloc);
-
-    const pvisci = vk.PipelineVertexInputStateCreateInfo{
-        .vertex_binding_description_count = DvuiVkBackend.VkRenderer.VertexBindings.binding_description.len,
-        .p_vertex_binding_descriptions = &DvuiVkBackend.VkRenderer.VertexBindings.binding_description,
-        .vertex_attribute_description_count = DvuiVkBackend.VkRenderer.VertexBindings.attribute_description.len,
-        .p_vertex_attribute_descriptions = &DvuiVkBackend.VkRenderer.VertexBindings.attribute_description,
-    };
-
-    return createPipeline(dev, layout, render_pass, &pssci, pvisci, vk_alloc);
 }
 
 fn createPipeline(

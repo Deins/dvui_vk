@@ -10,7 +10,7 @@ comptime {
     _ = @import("dvui_c.zig");
 }
 
-pub const VkRenderer = @import("dvui_vk_renderer.zig");
+pub const VkRenderer = @import("dvui_vulkan_renderer");
 
 pub const InitOptions = struct {
     dvui_gpa: std.mem.Allocator,
@@ -69,7 +69,7 @@ pub const InitWindowResult = struct {
     }
 };
 
-pub const vk = @import("vk");
+pub const vk = VkRenderer.vulkan;
 pub const dvui_vk_common = @import("dvui_vk_common.zig");
 pub const DecorationMode = low.DecorationMode;
 pub const WindowState = low.WindowState;
@@ -772,7 +772,7 @@ pub fn main() !void {
             const ctx = b.contexts.items[i];
             syncWindowState(ctx);
             try paint(app, &g_app_state, ctx);
-            b.prev_frame_stats = b.renderer.?.stats;
+            b.prev_frame_stats = b.renderer.?.statsSnapshot();
             if (ctx.received_close) {
                 if (ctx == iw.window) break :main_loop;
                 b.destroyContext(ctx);

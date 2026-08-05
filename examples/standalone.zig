@@ -81,7 +81,7 @@ pub fn main() !void {
                 while (i < g_app_state.backend.contexts.items.len) {
                     const ctx = g_app_state.backend.contexts.items[i];
                     try paint(&g_app_state, ctx);
-                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.stats;
+                    g_app_state.backend.prev_frame_stats = g_app_state.backend.renderer.?.statsSnapshot();
                     if (ctx.received_close) {
                         g_app_state.backend.destroyContext(ctx);
                         continue;

@@ -1,32 +1,33 @@
-# Vulkan Backend for dvui 
+# Vulkan Backend for dvui
+
+> [!NOTE]
+> Vulkan renderer and Wio Vulkan backend developed here were merged into DVUI in [david-vanderson/dvui#941](https://github.com/david-vanderson/dvui/pull/941).
+> This now is my personal experimentation repository for integrating [DVUI](https://github.com/david-vanderson/dvui) with my custom low-level [`low`](https://github.com/Deins/low) windowing library. 
+
 [![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 
-This project provides a vulkan backend for [dvui](https://github.com/david-vanderson/dvui).  
-Targeting `vulkan 1.3` and newer, and `zig v0.16` (see tags for older)
+Targets Vulkan 1.3 and newer and Zig 0.16 (see tags for older versions).
 
 ![screenshot](examples/3d/screenshot.png)
 
-### Current platform support
+### Scope and platform support
 
-* **Windows** and **Linux** through the cross-platform [`low`](https://github.com/Deins/low) platform layer.
-* An alternative [`wio`](https://github.com/ypsvlq/wio)-based Vulkan window/input backend, selected with `-Dwindow_backend=wio`.
-  Linux builds support X11 and Wayland.
+- Windows and Linux through `low`; Linux builds support X11 and Wayland.
+- The custom DVUI platform backend, Vulkan presentation integration, and experiments specific to `low` remain here.
+- The renderer and Wio backend live in DVUI upstream and are intentionally not duplicated here.
 
-The backend is split into these parts:
-* [dvui_vk_renderer.zig](./src/dvui_vk_renderer.zig) - platform-independent Vulkan rendering for applications that provide their own windowing and input.
-* [dvui_vk_low.zig](./src/dvui_vk_low.zig) - the main DVUI backend, using `low` for cross-platform windowing, input, and Vulkan presentation.
-* [dvui_vk_common.zig](./src/dvui_vk_common.zig) - shared Vulkan context and rendering helpers used by the `low` backend.
-* [dvui_vk_wio.zig](./src/dvui_vk_wio.zig) - the alternative `wio` window/input backend with its own Vulkan surface and swapchain bridge.
+The remaining backend is split into:
+
+- [dvui_vk_low.zig](./src/dvui_vk_low.zig) — DVUI platform integration using `low` for cross-platform windowing and input.
+- [dvui_vk_common.zig](./src/dvui_vk_common.zig) — Vulkan context, presentation, and rendering glue shared by the `low` integration.
 
 ### todo, known issues
-* Rendering:
-    * textureRead() not implemented
-    * option to pass in general purpose gpu memory allocator for textures
-    * linear color space frame-buffers. (easily switchable with source modifications, but tricky to expose).
-* Platform functionality:
-    * should try to get free-type running for dvui text rendering instead of default stb-truetype. As text rendering quality is not as good. 
-    * Touch events
-    * Some platform-specific functionality is still incomplete; see [TODO.md](./TODO.md).
+- Rendering:
+    - Linear color-space framebuffers (easy to switch in source, but tricky to expose cleanly).
+- Platform functionality:
+    - Try FreeType for DVUI text rendering instead of the default stb-truetype.
+    - Touch events.
+    - Some platform-specific functionality is still incomplete; see [TODO.md](./TODO.md).
 
 ## Build & Run
 ```sh

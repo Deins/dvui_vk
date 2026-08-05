@@ -6,8 +6,8 @@
     .dependencies = .{
         .dvui = .{
             // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui?ref=main#7426b65eb38261f0bbb8820cbbc50947f6aba7bf",
-            .hash = "dvui-0.5.0-dev-AQFJmaJd_QARcAWztcpSHr9GX9MoAibD6tK_3_pXZP4Q",
+            .url = "git+https://github.com/david-vanderson/dvui?ref=main#01bf49dbe74ccb013e6d66f452961648e2536bbe",
+            .hash = "dvui-0.5.0-dev-AQFJmfJ-AAGa8xCQ8f5vjrK8JQ5gNbC46Em5LCISCPry",
         },
         .vulkan = .{
             //.path = "vulkan-zig",
@@ -18,11 +18,6 @@
             .url = "git+https://github.com/Deins/low#7561e9098dca75cb6fbbd6fdd7c6d89534866d15",
             .hash = "low-0.1.0-d-W1KZ7EEAB21UenulPoecj4LRbCmlEgDL_uZ7KHbBw_",
         },
-        .wio = .{
-            .url = "git+https://github.com/ypsvlq/wio#c7a0b1ec889c8c17841ffb04ae3d31810328cc64",
-            .hash = "wio-0.0.0-8xHrr_kECABNBaGmnTW2ymwtaa-Oqg3CWN_tXK6KGFkZ",
-        },
-
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{
             .url = "https://github.com/KhronosGroup/Vulkan-Headers/archive/3dda5a1a87b62fdf3baf4680edc41c00e85a7a22.tar.gz",
