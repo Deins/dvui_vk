@@ -72,7 +72,7 @@ pub fn build(b: *Build) !void {
         .target = target,
         .optimize = optimize,
         .backend = .custom,
-        .renderer = .vulkan,
+        .renderer = .vulkan_external,
         .@"tree-sitter" = false,
     });
     const dvui_module = dvui_dep.module("dvui");

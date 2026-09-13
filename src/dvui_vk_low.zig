@@ -246,12 +246,12 @@ pub fn sleep(_: ContextHandle, ns: u64) void {
 /// temporary allocations needed only for this frame.
 pub fn begin(context_handle: ContextHandle, arena: std.mem.Allocator) GenericError!void {
     get(context_handle).arena = arena;
-    context_handle.renderer().begin(arena, context_handle.pixelSize());
+    try context_handle.renderer().beginWithSize(arena, context_handle.pixelSize());
 }
 
 /// Called during `dvui.Window.end` before freeing any memory for the current frame.
 pub fn end(context_handle: ContextHandle) GenericError!void {
-    context_handle.renderer().end();
+    try context_handle.renderer().end();
     get(context_handle).arena = undefined;
 }
 
@@ -280,7 +280,7 @@ pub fn contentScale(_: ContextHandle) f32 {
 /// physical pixels.  If `texture` is given, the vertexes uv coords are
 /// normalized (0-1). `clipr` (if given) has whole pixel values.
 pub fn drawClippedTriangles(ch: ContextHandle, texture: ?dvui.Texture, vtx: []const dvui.Vertex, idx: []const u16, clipr: ?dvui.Rect.Physical) GenericError!void {
-    return ch.renderer().drawClippedTriangles(texture, vtx, idx, clipr);
+    return ch.renderer().drawClippedTriangles(ch.pixelSize(), texture, vtx, idx, clipr);
 }
 
 /// Create a `dvui.Texture` from premultiplied alpha `pixels` in RGBA.  The
