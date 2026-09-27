@@ -12,8 +12,8 @@
         //     .hash = "zig_math-0.0.2-QZAfd2SNBQACr_ss3tshIegRZFAO2OYJxA2_qFa8Fn6k",
         // },
         .zmath = .{
-            .url = "git+https://github.com/zig-gamedev/zmath.git#3a5955b2b72cd081563fbb084eff05bffd1e3fbb",
-            .hash = "zmath-0.11.0-dev-wjwivdMsAwD-xaLj76YHUq3t9JDH-X16xuMTmnDzqbu2",
+            .url = "git+https://github.com/zig-gamedev/zmath.git#9e42b04a24c970a297b365f3d3022f92dbf3219d",
+            .hash = "zmath-0.11.0-dev-wjwivTwtAwDOjG2_KGP-HLtHrONfsFfHttalmxFAGVAK",
         },
         .zgltf = .{
             .url = "git+https://github.com/kooparse/zgltf.git#ec52d477db346af99d4cdced4e35e67e1670023f",
