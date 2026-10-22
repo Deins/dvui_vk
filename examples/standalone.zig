@@ -27,7 +27,7 @@ pub const AppState = struct {
         const b = iw.backend;
         const window_context = iw.window;
 
-        const color_format: vk.Format = @enumFromInt(window_context.render_target.?.colorFormat());
+        const color_format: vk.Format = @fromBackingInt(@intCast(window_context.render_target.?.colorFormat()));
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,

@@ -142,7 +142,7 @@ pub const AppState = struct {
         }
 
         const render_pass = vk.RenderPass.null_handle;
-        const color_format: vk.Format = @enumFromInt(window_context.render_target.?.colorFormat());
+        const color_format: vk.Format = @fromBackingInt(@intCast(window_context.render_target.?.colorFormat()));
 
         b.renderer = try DvuiVkBackend.VkRenderer.init(b.gpa, .{
             .dev = b.vkc.device,
@@ -700,7 +700,7 @@ fn createPipeline(
         .p_next = if (dynamic_rendering) &vk.PipelineRenderingCreateInfo{
             .color_attachment_count = 1,
             .view_mask = 0,
-            .p_color_attachment_formats = &[_]vk.Format{@enumFromInt(g_app_state.backend.contexts.items[0].render_target.?.colorFormat())},
+            .p_color_attachment_formats = &[_]vk.Format{@fromBackingInt(@intCast(g_app_state.backend.contexts.items[0].render_target.?.colorFormat()))},
             .depth_attachment_format = DepthBuffer.format,
             .stencil_attachment_format = .undefined,
         } else null,
@@ -858,11 +858,11 @@ pub const Model = struct {
                     if (accessor.buffer_view == null) return error.OutOfBounds;
                     if (gltf.data.buffer_views.len <= accessor.buffer_view.?) return error.OutOfBounds;
                     const buf_view = gltf.data.buffer_views[accessor.buffer_view.?];
-                    out_mesh.attributes[@intFromEnum(attribute)] = .{
+                    out_mesh.attributes[@backingInt(attribute)] = .{
                         .buffer = buf,
                         .offset = accessor.byte_offset + buf_view.byte_offset,
                     };
-                    out_mesh.accessors[@intFromEnum(attribute)] = @intCast(accessor_idx);
+                    out_mesh.accessors[@backingInt(attribute)] = @intCast(accessor_idx);
                 }
                 if (primitive.indices) |accessor_idx| { // index buffer
                     if (accessor_idx >= gltf.data.accessors.len) return error.OutOfBounds;
@@ -949,7 +949,7 @@ pub const ShaderPipelineCache = struct {
             };
             var i: u32 = 0;
             for (mesh.attributes, 0..) |attr, attribute_type_| {
-                const attribute_type: Model.Mesh.Attribute = @enumFromInt(attribute_type_);
+                const attribute_type: Model.Mesh.Attribute = @fromBackingInt(@intCast(attribute_type_));
                 if (attr.buffer == .null_handle) continue;
                 const accessor = model.accessors[mesh.accessors[attribute_type_]];
                 const element_size: u32 = switch (accessor.component_type) {
@@ -976,7 +976,7 @@ pub const ShaderPipelineCache = struct {
                 };
                 attribute_descriptions[i] = .{
                     .binding = i,
-                    .location = @intFromEnum(attribute_type),
+                    .location = @backingInt(attribute_type),
                     .format = .r32g32b32a32_sfloat,
                     .offset = 0, //@offsetOf(Vertex, "pos"),
                 };
