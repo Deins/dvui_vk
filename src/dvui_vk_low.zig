@@ -111,7 +111,7 @@ pub const vk_dll = @import("vk_dll.zig");
 
 var g_low_context: ?low.Context = null;
 var g_low_context_refs: usize = 0;
-var g_low_window_contexts: std.ArrayListUnmanaged(*WindowContext) = .empty;
+var g_low_window_contexts: std.ArrayList(*WindowContext) = .empty;
 
 pub fn dvuiBackend(context: *WindowContext) dvui.Backend {
     return dvui.Backend.init(@ptrCast(@alignCast(context)));
@@ -207,7 +207,7 @@ fn initRenderTarget(ctx: *WindowContext, window: *low.Window, options: InitOptio
         vkc.low_device,
         low.vulkan.toQueue(vkc.graphics_queue.handle),
         vkc.physical_device.graphics_queue_index,
-        @intCast(@intFromEnum(vkc.cmd_pool)),
+        @intCast(@backingInt(vkc.cmd_pool)),
     );
     if (vkc.physical_device.present_queue_index) |family| {
         ctx.render_context.present_queue = .{
@@ -656,7 +656,7 @@ pub fn initWindow(init_opts: InitOptions) !InitWindowResult {
     };
     if (comptime @hasField(low.WindowOptions, "placement")) {
         const placement = init_opts.placement orelse if (init_opts.size != null) WindowPlacement.centered else .default;
-        window_options.placement = @enumFromInt(@intFromEnum(placement));
+        window_options.placement = @fromBackingInt(@intCast(@backingInt(placement)));
     }
     const created_window = try low_ctx.createWindow(window_options);
     window = created_window;
@@ -730,7 +730,7 @@ pub fn main() !void {
     defer iw.deinit();
     const b = iw.backend;
 
-    const color_format: vk.Format = @enumFromInt(iw.window.render_target.?.colorFormat());
+    const color_format: vk.Format = @fromBackingInt(@intCast(iw.window.render_target.?.colorFormat()));
     var color_formats = [_]vk.Format{color_format};
 
     g_app_state = .{

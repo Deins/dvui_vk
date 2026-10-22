@@ -77,6 +77,7 @@ pub fn build(b: *Build) !void {
     });
     const dvui_module = dvui_dep.module("dvui");
     const dvui_vulkan_renderer = dvui_dep.module("dvui_vulkan_renderer");
+    dvui_vulkan_renderer.addImport("vk", vkzig_bindings);
     const stb_source = "vendor/stb/";
     // dvui deps
     dvui_module.link_libc = true;
@@ -126,7 +127,7 @@ pub fn build(b: *Build) !void {
         exe.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
             exe.win32_manifest = dvui_dep.path("./src/main.manifest");
-            exe.subsystem = .Windows;
+            exe.subsystem = .windows;
         }
         b.installArtifact(exe);
         b.step("run-app", "Run demo").dependOn(&b.addRunArtifact(exe).step);
@@ -149,7 +150,7 @@ pub fn build(b: *Build) !void {
         exe_standalone.root_module.addImport("vulkan", vkzig_bindings);
         if (target.result.os.tag == .windows) {
             exe_standalone.win32_manifest = dvui_dep.path("./src/main.manifest");
-            exe_standalone.subsystem = .Windows;
+            exe_standalone.subsystem = .windows;
         }
         b.installArtifact(exe_standalone);
         b.step("run", "Run demo").dependOn(&b.addRunArtifact(exe_standalone).step);
@@ -164,25 +165,18 @@ pub fn build(b: *Build) !void {
 fn patchedGlibcLibcFile(b: *Build) ?Build.LazyPath {
     if (b.graph.host.result.os.tag != .linux) return null;
 
-    const patch_dir = b.cache_root.join(b.allocator, &.{"crt-patched"}) catch return null;
-
-    // Copy system CRT files + glibc stubs to our dir, then strip .sframe from crt1.o.
-    // The libc file's crt_dir is also the library search path for glibc stubs (libdl.a etc.),
-    // so we need all small files (*.o, stub *.a < 200KB, linker-script *.so < 10KB) not just CRT.
-    const patch = b.addSystemCommand(&[_][]const u8{ "sh", "-c", b.fmt(
-        "CRT1=$(cc -print-file-name=crt1.o 2>/dev/null || echo /usr/lib/crt1.o) && " ++
-            "CRTDIR=$(dirname \"$CRT1\") && mkdir -p {0s} && " ++
-            "find \"$CRTDIR\" -maxdepth 1 \\( -name \"*.o\" -o \\( -name \"lib*.a\" -size -200k \\) -o \\( -name \"lib*.so\" -size -10k \\) \\) -exec cp -P {{}} {0s}/ \";\" && " ++
-            "objcopy --remove-section .sframe {0s}/crt1.o 2>/dev/null; true",
-        .{patch_dir},
-    ) });
-
-    const wf = b.addWriteFiles();
-    wf.step.dependOn(&patch.step);
-    return wf.add("patched-libc.txt", b.fmt(
-        "include_dir=/usr/include\nsys_include_dir=/usr/include\ncrt_dir={s}\nmsvc_lib_dir=\nkernel32_lib_dir=\ngcc_dir=\n",
-        .{patch_dir},
-    ));
+    const patch = b.addSystemCommand(&.{
+        "sh",        "-ec",
+        \\crt1=$(cc -print-file-name=crt1.o)
+        \\crt_dir=$(dirname "$crt1")
+        \\cc_dir=$(dirname "$(cc -print-file-name=crtbegin.o)")
+        \\find "$crt_dir" -maxdepth 1 \( -name '*.o' -o \( -name 'lib*.a' -size -200k \) -o \( -name 'lib*.so' -size -10k \) \) -exec cp -P {} "$1/" \;
+        \\objcopy --remove-section .sframe "$1/crt1.o"
+        \\printf 'include_dir=/usr/include\nsys_include_dir=/usr/include\ncrt_dir=%s\nmsvc_lib_dir=\nkernel32_lib_dir=\ncc_dir=%s\ndarwin_sdk_dir=\n' "$1" "$cc_dir" > "$1/patched-libc.txt"
+        ,
+        "patch-crt",
+    });
+    return patch.addOutputDirectoryArg("crt-patched").path(b, "patched-libc.txt");
 }
 
 pub const Shader = struct {
@@ -202,7 +196,7 @@ pub const ShaderCompileOptions = struct {
 
 pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderCompileOptions) std.ArrayList(Shader) {
     var shaders: std.ArrayList(Shader) = .empty;
-    const cwd = b.build_root.handle;
+    const cwd = b.root;
     const dir = cwd.openDir(b.graph.io, shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}'", .{shader_subpath});
     const dbg_print = false;
     if (dbg_print) { // debug print dir

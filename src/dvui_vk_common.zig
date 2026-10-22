@@ -170,7 +170,7 @@ pub const VkContext = struct {
         const present_queue = vk.QueueProxy.init(present_queue_handle, device.wrapper);
 
         const cmd_pool = try device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = selection.graphics_queue_family,
         }, opt.vk_alloc);
 
@@ -213,7 +213,7 @@ pub const VkContext = struct {
         const low_instance = try low_loader.loadInstanceApi(low.vulkan.toInstance(resources.instance.handle));
         const low_device = try low.vulkan.Device.init(&low_instance, low.vulkan.toDevice(resources.device.handle));
         const cmd_pool = try resources.device.createCommandPool(&.{
-            .flags = .{ .reset_command_buffer_bit = true },
+            .flags = .{ .reset_command_buffer = true },
             .queue_family_index = resources.physical_device.graphics_queue_index,
         }, vk_alloc);
         return .{
@@ -237,7 +237,7 @@ pub const VkContext = struct {
 pub const VkBackend = struct {
     gpa: std.mem.Allocator,
     vk_alloc: ?*vk.AllocationCallbacks = null,
-    contexts: std.ArrayListUnmanaged(*WindowContext) = .empty,
+    contexts: std.ArrayList(*WindowContext) = .empty,
     contexts_pool: std.heap.MemoryPool(WindowContext),
 
     vkc: VkContext,

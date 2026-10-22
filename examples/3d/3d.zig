@@ -39,11 +39,11 @@ pub const DepthBuffer = struct {
             .extent = .{ .width = size.width, .height = size.height, .depth = 1 },
             .mip_levels = 1,
             .array_layers = 1,
-            .samples = .{ .@"1_bit" = true },
+            .samples = .{ .@"1" = true },
             .tiling = .optimal,
             .usage = .{
-                // .sampled_bit = true,
-                .depth_stencil_attachment_bit = true,
+                // .sampled = true,
+                .depth_stencil_attachment = true,
             },
             .sharing_mode = .exclusive,
             .initial_layout = .undefined,
@@ -65,7 +65,7 @@ pub const DepthBuffer = struct {
                 .a = .identity,
             },
             .subresource_range = .{
-                .aspect_mask = .{ .depth_bit = true },
+                .aspect_mask = .{ .depth = true },
                 .base_mip_level = 0,
                 .level_count = 1,
                 .base_array_layer = 0,
@@ -97,7 +97,7 @@ pub const DepthBuffer = struct {
                 .dst_queue_family_index = vk.QUEUE_FAMILY_IGNORED,
                 .image = self.image,
                 .subresource_range = .{
-                    .aspect_mask = .{ .depth_bit = true },
+                    .aspect_mask = .{ .depth = true },
                     .base_mip_level = 0,
                     .level_count = 1,
                     .base_array_layer = 0,
@@ -211,7 +211,7 @@ pub const Scene = struct {
             // .p_set_layouts = @ptrCast(&dsl),
             .push_constant_range_count = 1,
             .p_push_constant_ranges = &.{.{
-                .stage_flags = .{ .vertex_bit = true },
+                .stage_flags = .{ .vertex = true },
                 .offset = 0,
                 .size = @sizeOf(f32) * 4 * 4 * 3,
             }},
@@ -231,13 +231,13 @@ pub const Scene = struct {
         };
         var pssci = [_]vk.PipelineShaderStageCreateInfo{
             .{
-                .stage = .{ .vertex_bit = true },
+                .stage = .{ .vertex = true },
                 .p_name = "main",
                 .module = if (ext_m5) null else try dev.createShaderModule(&vert_shdd, vkc.alloc),
                 .p_next = if (ext_m5) &vert_shdd else null,
             },
             .{
-                .stage = .{ .fragment_bit = true },
+                .stage = .{ .fragment = true },
                 //.module = frag,
                 .p_name = "main",
                 .module = if (ext_m5) null else try dev.createShaderModule(&frag_shdd, vkc.alloc),
@@ -318,7 +318,7 @@ pub const Scene = struct {
             .mvp = zm.mul(model, zm.mul(view, projection)),
         };
         if (@sizeOf(f32) * 4 * 4 + 4 * @sizeOf(f32) != @sizeOf(@TypeOf(push_constants))) unreachable;
-        // dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+        // dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(PushConstants), &push_constants);
 
         // dev.cmdBindIndexBuffer(cmdbuf, self.index_buffer, 0, .uint16);
         // dev.cmdBindVertexBuffers(cmdbuf, 0, 1, @ptrCast(&self.vertex_buffer), &[_]vk.DeviceSize{0});
@@ -332,7 +332,7 @@ pub const Scene = struct {
                 dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
 
                 push_constants.col = m.materials[mesh.material].metallic_roughness.base_color_factor;
-                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(PushConstants), &push_constants);
 
                 mesh.draw(dev, cmdbuf);
             }
@@ -345,7 +345,7 @@ pub const Scene = struct {
                 dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
 
                 push_constants.col = m.materials[mesh.material].metallic_roughness.base_color_factor;
-                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex_bit = true }, 0, @sizeOf(PushConstants), &push_constants);
+                dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(PushConstants), &push_constants);
 
                 mesh.draw(dev, cmdbuf);
             }
@@ -359,7 +359,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 
     const color_attachment = vk.AttachmentDescription{
         .format = image_format,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
         .load_op = .clear,
         .store_op = .store,
         .stencil_load_op = .dont_care,
@@ -374,7 +374,7 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
 
     const depth_attachment = vk.AttachmentDescription{
         .format = DepthBuffer.format,
-        .samples = .{ .@"1_bit" = true },
+        .samples = .{ .@"1" = true },
         .load_op = .clear,
         .store_op = .dont_care,
         .stencil_load_op = .dont_care,
@@ -396,10 +396,10 @@ pub fn createRenderPass(device: vk.DeviceProxy, image_format: vk.Format) !vk.Ren
     const dependencies = [_]vk.SubpassDependency{.{
         .src_subpass = vk.SUBPASS_EXTERNAL,
         .dst_subpass = 0,
-        .src_stage_mask = .{ .color_attachment_output_bit = true, .late_fragment_tests_bit = true },
-        .src_access_mask = .{ .depth_stencil_attachment_write_bit = true },
-        .dst_stage_mask = .{ .color_attachment_output_bit = true, .early_fragment_tests_bit = true },
-        .dst_access_mask = .{ .color_attachment_write_bit = true, .depth_stencil_attachment_write_bit = true },
+        .src_stage_mask = .{ .color_attachment_output = true, .late_fragment_tests = true },
+        .src_access_mask = .{ .depth_stencil_attachment_write = true },
+        .dst_stage_mask = .{ .color_attachment_output = true, .early_fragment_tests = true },
+        .dst_access_mask = .{ .color_attachment_write = true, .depth_stencil_attachment_write = true },
     }};
 
     const attachments = [_]vk.AttachmentDescription{ color_attachment, depth_attachment };
@@ -617,7 +617,7 @@ fn createPipeline(
         .depth_clamp_enable = .false,
         .rasterizer_discard_enable = .false,
         .polygon_mode = .fill,
-        .cull_mode = .{ .back_bit = false },
+        .cull_mode = .{ .back = false },
         .front_face = .clockwise,
         .depth_bias_enable = .false,
         .depth_bias_constant_factor = 0,
@@ -627,7 +627,7 @@ fn createPipeline(
     };
 
     const pmsci = vk.PipelineMultisampleStateCreateInfo{
-        .rasterization_samples = .{ .@"1_bit" = true },
+        .rasterization_samples = .{ .@"1" = true },
         .sample_shading_enable = .false,
         .min_sample_shading = 1,
         .alpha_to_coverage_enable = .false,
@@ -643,7 +643,7 @@ fn createPipeline(
         .src_alpha_blend_factor = .one,
         .dst_alpha_blend_factor = .one_minus_src_alpha,
         .alpha_blend_op = .add,
-        .color_write_mask = .{ .r_bit = true, .g_bit = true, .b_bit = true, .a_bit = true },
+        .color_write_mask = .{ .r = true, .g = true, .b = true, .a = true },
     };
 
     const pcbsci = vk.PipelineColorBlendStateCreateInfo{
@@ -741,7 +741,7 @@ pub const Model = struct {
             buffer: vk.Buffer = vk.Buffer.null_handle, // doesn't own
             offset: vk.DeviceSize = 0,
         };
-        attributes: [max_attributes]AttributeBinding = [1]AttributeBinding{.{}} ** max_attributes,
+        attributes: [max_attributes]AttributeBinding = @as([max_attributes]AttributeBinding, @splat(.{})),
         indices: AttributeBinding = .{},
         indices_len: u32 = 0,
         // for pipeline creation, points to model accesors
@@ -809,7 +809,7 @@ pub const Model = struct {
         // support only glb single buffer
         const buf = try dev.createBuffer(&.{
             .size = mem_size,
-            .usage = vk.BufferUsageFlags{ .vertex_buffer_bit = true, .index_buffer_bit = true },
+            .usage = vk.BufferUsageFlags{ .vertex_buffer = true, .index_buffer = true },
             .sharing_mode = .exclusive,
         }, vk_alloc);
         const mem_req = dev.getBufferMemoryRequirements(buf);
@@ -910,7 +910,7 @@ pub const Model = struct {
 pub const ShaderPipelineCache = struct {
     const max_attributes = Model.Mesh.max_attributes;
     const max_permutations = (1 << max_attributes);
-    pipelines: [max_permutations]vk.Pipeline = [_]vk.Pipeline{.null_handle} ** max_permutations,
+    pipelines: [max_permutations]vk.Pipeline = @as([max_permutations]vk.Pipeline, @splat(.null_handle)),
 
     // not owned
     pipeline_description: PipelineDescription,

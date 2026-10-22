@@ -1,22 +1,18 @@
 .{
     .name = .dvui_vk,
     .version = "0.0.0",
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .fingerprint = 0x8c17814f9967671d,
     .dependencies = .{
         .dvui = .{
-            // .path = "dvui",
-            .url = "git+https://github.com/david-vanderson/dvui?ref=main#f719b09b7d23b5e734fa10f2c9e5004ca42590f6",
-            .hash = "dvui-0.5.0-dev-AQFJmZPiAwGJlkO3EpYY907g1uWyms6mXSz-zj_HQ2h8",
+            .url = "git+https://github.com/david-vanderson/dvui.git#02fcee0e2b48e251a11b475b1bd85387d204e604",
+            .hash = "dvui-0.6.0-dev-AQFJmUhLBAGorzUEJ5QnBc2aQvCHtsEAF1ewqGu6HWuA",
         },
         .vulkan = .{
-            //.path = "vulkan-zig",
-            .url = "git+https://github.com/Snektron/vulkan-zig#b496a6a561ffbbeb530b0f9ed4e059f88c0723a5",
-            .hash = "vulkan-0.0.0-r7Ytx7N9AwD7IZt5_XNHtkJ4G9qY0pCH-cpcOsbL8wzD",
+            .path = "../vulkan-zig",
         },
         .low = .{
-            .url = "git+https://github.com/Deins/low#fe14be5969f8d9b7399bf303a0af088def2916a2",
-            .hash = "low-0.1.0-d-W1KRjPEABsu-PRKIQJbp5uVI7IV3khJhL1UZJuSzkf",
+            .path = "../low",
         },
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{
