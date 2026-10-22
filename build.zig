@@ -195,6 +195,7 @@ pub const ShaderCompileOptions = struct {
 };
 
 pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderCompileOptions) std.ArrayList(Shader) {
+    b.graph.poisonCache();
     var shaders: std.ArrayList(Shader) = .empty;
     const cwd = b.root;
     const dir = cwd.openDir(b.graph.io, shader_subpath, .{ .iterate = true }) catch std.debug.panic("can't open dir: '{s}'", .{shader_subpath});
@@ -259,20 +260,15 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
                                 "-o",
                             });
                             compile.setName("compile slang shaders");
-                            compile.addArg(out_name); // output file
+                            const output = compile.addOutputFileArg(out_name);
                             if (!options.optimize) {
                                 compile.addArg("-minimum-slang-optimization");
                                 compile.addArg("-g");
                             } else compile.addArg("-O3");
                             if (options.slang.?.row_major) compile.addArg("-matrix-layout-row-major") else compile.addArg("-matrix-layout-column-major");
-                            compile.addArg(f.name); // input file
-
                             compile.setCwd(b.path(shader_subpath));
-                            compile.addFileInput(.{ .src_path = .{ .owner = b, .sub_path = b.pathJoin(&.{ shader_subpath, f.name }) } });
-
-                            const gf = b.allocator.create(std.Build.GeneratedFile) catch unreachable;
-                            gf.* = std.Build.GeneratedFile{ .step = &compile.step, .path = out_path };
-                            shaders.append(b.allocator, Shader{ .name = out_name, .path = std.Build.LazyPath{ .generated = .{ .file = gf } }, .step = &compile.step }) catch @panic("OOM");
+                            compile.addFileArg(b.path(b.pathJoin(&.{ shader_subpath, f.name })));
+                            shaders.append(b.allocator, Shader{ .name = out_name, .path = output, .step = &compile.step }) catch @panic("OOM");
                         }
                     }
                 }
@@ -291,13 +287,9 @@ pub fn compileShaders(b: *Build, shader_subpath: []const u8, options: ShaderComp
                     });
                     compile.setName("compile glsl shaders");
                     compile.setCwd(b.path(shader_subpath));
-                    compile.addFileInput(.{ .src_path = .{ .owner = b, .sub_path = b.pathJoin(&.{ shader_subpath, f.name }) } });
-                    compile.addArg(out_name); // output file
-                    compile.addArg(f.name); // input file
-
-                    const gf = b.allocator.create(std.Build.GeneratedFile) catch unreachable;
-                    gf.* = std.Build.GeneratedFile{ .step = &compile.step, .path = out_path };
-                    break :blk Shader{ .name = out_name, .path = std.Build.LazyPath{ .generated = .{ .file = gf } } };
+                    const output = compile.addOutputFileArg(out_name);
+                    compile.addFileArg(b.path(b.pathJoin(&.{ shader_subpath, f.name })));
+                    break :blk Shader{ .name = out_name, .path = output, .step = &compile.step };
                 }) catch @panic("OOM");
             }
         }

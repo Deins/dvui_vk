@@ -11,6 +11,8 @@ const window_icon_png = @embedFile("zig-favicon.png");
 pub const dvui_app: dvui.App = .{
     .config = .{
         .options = .{
+            .org = "dvui_vk",
+            .app = "app_demo",
             .size = .{ .w = 800.0, .h = 600.0 },
             .min_size = .{ .w = 250.0, .h = 350.0 },
             .title = "DVUI App Example",
@@ -66,9 +68,6 @@ pub fn AppFrame() !dvui.App.Result {
 }
 
 pub fn frame() !dvui.App.Result {
-    var scaler = dvui.scale(@src(), .{ .scale = &dvui.currentWindow().content_scale, .pinch_zoom = .global }, .{ .rect = .cast(dvui.windowRect()) });
-    scaler.deinit();
-
     {
         var hbox = dvui.box(@src(), .{ .dir = .horizontal }, .{ .style = .window, .background = true, .expand = .horizontal });
         defer hbox.deinit();
@@ -183,8 +182,22 @@ pub fn frame() !dvui.App.Result {
     dvui.Examples.demo(.full);
 
     dvui.currentWindow().backend.impl.get().drawStats();
+    globalPinchZoom();
 
     return .ok;
+}
+
+fn globalPinchZoom() void {
+    const id = dvui.Id.extendId(dvui.currentWindow().data().id, @src(), 0);
+    const scale_gesture = dvui.dataGetPtrDefault(null, id, "scale_gesture", f32, 1.0);
+    for (dvui.events()) |*event| {
+        if (event.handled or event.evt != .mouse) continue;
+        switch (event.evt.mouse.action) {
+            .pinch_begin => scale_gesture.* = dvui.currentWindow().content_scale,
+            .pinch_update => |scale| dvui.currentWindow().content_scale = scale_gesture.* * scale,
+            else => {},
+        }
+    }
 }
 
 test "tab order" {

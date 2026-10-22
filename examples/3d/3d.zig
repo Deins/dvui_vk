@@ -303,7 +303,7 @@ pub const Scene = struct {
         dev.cmdSetScissor(cmdbuf, 0, &scissors);
 
         const PushConstants = extern struct {
-            mvp: zm.Mat,
+            mvp: [16]f32 align(16),
             col: [4]f32 = .{ 1, 1, 1, 1 },
         };
 
@@ -315,7 +315,7 @@ pub const Scene = struct {
         const view = zm.identity();
         const projection = zm.perspectiveFovRh(std.math.degreesToRadians(60.0), framebuffer_size.w / framebuffer_size.h, 0.01, 100);
         var push_constants = PushConstants{
-            .mvp = zm.mul(model, zm.mul(view, projection)),
+            .mvp = zm.matToArr(zm.mul(model, zm.mul(view, projection))),
         };
         if (@sizeOf(f32) * 4 * 4 + 4 * @sizeOf(f32) != @sizeOf(@TypeOf(push_constants))) unreachable;
         // dev.cmdPushConstants(cmdbuf, self.pipeline_layout, .{ .vertex = true }, 0, @sizeOf(PushConstants), &push_constants);
@@ -326,7 +326,7 @@ pub const Scene = struct {
 
         {
             const m = self.zig_model;
-            push_constants.mvp = zm.mul(zm.mul(model, zm.translation(0, -1, 0)), zm.mul(view, projection));
+            push_constants.mvp = zm.matToArr(zm.mul(zm.mul(model, zm.translation(0, -1, 0)), zm.mul(view, projection)));
             for (m.meshes) |mesh| {
                 const pipeline = self.pipeline_cache.get(mesh);
                 dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
@@ -339,7 +339,7 @@ pub const Scene = struct {
         }
         {
             const m = self.vk_model;
-            push_constants.mvp = zm.mul(zm.mul(model, zm.translation(0, 1, 0)), zm.mul(view, projection));
+            push_constants.mvp = zm.matToArr(zm.mul(zm.mul(model, zm.translation(0, 1, 0)), zm.mul(view, projection)));
             for (m.meshes) |mesh| {
                 const pipeline = self.pipeline_cache.get(mesh);
                 dev.cmdBindPipeline(cmdbuf, .graphics, pipeline);
@@ -736,7 +736,7 @@ pub const Model = struct {
             norm,
             uv,
         };
-        pub const max_attributes = std.meta.fields(Model.Mesh.Attribute).len;
+        pub const max_attributes = @typeInfo(Model.Mesh.Attribute).@"enum".field_names.len;
         pub const AttributeBinding = struct {
             buffer: vk.Buffer = vk.Buffer.null_handle, // doesn't own
             offset: vk.DeviceSize = 0,
