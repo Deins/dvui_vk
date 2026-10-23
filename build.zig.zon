@@ -9,10 +9,12 @@
             .hash = "dvui-0.6.0-dev-AQFJmUhLBAGorzUEJ5QnBc2aQvCHtsEAF1ewqGu6HWuA",
         },
         .vulkan = .{
-            .path = "../vulkan-zig",
+            .url = "git+https://github.com/Snektron/vulkan-zig.git#ff62f6efc7b966f91c0b4ea7a2394c8cca7892e5",
+            .hash = "vulkan-0.0.0-r7Ytx_6DAwDB1QJAbIew5IzR2PiiAtJENX5kdJHf449X",
         },
         .low = .{
-            .path = "../low",
+            .url = "git+https://github.com/Deins/low.git#f492dccec6164af2ecc2bd478b1c724c6954df2b",
+            .hash = "low-0.1.0-d-W1KabNEABW5oZBLPmqf6o2RMGGmvMOnxtwEy2nBr78",
         },
         // optional: to still compile without vulkan_sdk or manually passing in vk.xml through args
         .vulkan_headers = .{

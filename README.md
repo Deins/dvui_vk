@@ -6,7 +6,7 @@
 
 [![Build](https://github.com/Deins/dvui_vk/actions/workflows/build.yml/badge.svg)](https://github.com/Deins/dvui_vk/actions/workflows/build.yml)
 
-Targets Vulkan 1.3 and newer and Zig 0.16 (see tags for older versions).
+Targets Vulkan 1.3 and newer and Zig 0.17.0 (see tags for older versions).
 
 ![screenshot](examples/3d/screenshot.png)
 
@@ -31,7 +31,7 @@ The remaining backend is split into:
 
 ## Build & Run
 ```sh
-zig build run-app -Doptimize=ReleaseFast
+zig build run-app -Doptimize=fast
 ```
 Vulkan SDK is optional but recommended for development (to be able to run vulkan validation layers etc). To use vulkan sdk make sure `VULKAN_SDK` environment variable is correctly defined. 
 

@@ -16,7 +16,7 @@ jobs:
             target: x86_64-linux-gnu.2.17
     runs-on: ${{ matrix.os }}
     env:
-      ZIG_VERSION: 0.16.0
+      ZIG_VERSION: 0.17.0
     steps:
       - uses: actions/checkout@v6
       - uses: mlugg/setup-zig@v2.0.5

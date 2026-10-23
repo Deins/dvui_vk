@@ -16,7 +16,8 @@
             .hash = "zmath-0.11.0-dev-wjwivaAtAwA7W0_rRXAqdwjWGigw6_pxgsYtAdjUbqUj",
         },
         .zgltf = .{
-            .path = "../../../zgltf",
+            .url = "git+https://github.com/Deins/zgltf.git#9662f4bc3f0fa82036a435938e283678f1e6d2b4",
+            .hash = "zgltf-0.1.0-sX6QAlASAgBAS1CcLgBpcdUrkfNK3jBte3_o6Bc02KnF",
         },
     },
     .paths = .{""},
